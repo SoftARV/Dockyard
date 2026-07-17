@@ -94,6 +94,7 @@ src/
     types.rs                  our Container/ContainerState/Port
   components/
     container_row.rs          FactoryComponent -> adw::ActionRow
+    logs_page.rs              Component -> adw::NavigationPage, streaming log view
 data/
   dev.miguelrincon.Dockyard.desktop    launcher entry
   icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
@@ -142,6 +143,61 @@ errors are handled — the same reason you keep `fetch` out of React components.
 ---
 
 ## Rust things you'll hit in this codebase
+
+### Streaming, and cancelling a stream
+
+Every Docker call except one is a `oneshot_command`: fire an async request, get
+one message back. Logs are the exception — they *follow*, producing output for
+as long as you watch. That needs the other half of relm4's async API, and it's
+worth understanding because it's the first genuinely new shape since the
+Redux-with-a-compiler core.
+
+`oneshot_command(async { ... })` runs a future that resolves to **one**
+`CommandOutput`. `command(|out, shutdown| ...)` instead hands you:
+
+- `out` — a `Sender`, so you push **many** `CommandOutput`s over time (one per
+  log chunk), each landing in `update_cmd` on the main thread.
+- `shutdown` — a `ShutdownReceiver`, the cancellation handle.
+
+The idiom, straight from relm4's own examples:
+
+```rust
+sender.command(|out, shutdown| {
+    shutdown
+        .register(async move {
+            let mut stream = client::logs(&docker, &id);
+            while let Some(item) = stream.next().await {
+                if out.send(chunk).is_err() { return; }   // receiver gone
+            }
+        })
+        .drop_on_shutdown()   // <- the important bit
+        .boxed()
+});
+```
+
+`drop_on_shutdown()` is what makes this clean. It says: when this component
+shuts down, *drop the future*. Dropping a Rust future mid-`await` cancels it —
+the `stream.next()` is abandoned, the HTTP connection to Docker closes, the
+follow stops. No cancellation flag to check, no token to thread through.
+
+The trick is arranging for "component shuts down" to mean "user left the logs
+page". That's the lifecycle in `app.rs`:
+
+- `AppModel` holds `logs: Option<Controller<LogsPage>>`. **Holding the
+  controller is what keeps the component — and its stream — alive.**
+- Navigate-back fires `NavigationView::popped`; the reducer sets
+  `self.logs = None`; the controller drops; the component shuts down;
+  `drop_on_shutdown` cancels the stream.
+
+So the stream lives exactly as long as the page is on screen, enforced by
+ownership rather than by remembering to clean up. This was verified, not
+assumed: with a container logging every 0.3s, chunks arrived while the page was
+open and *stopped the instant it closed* — a leaked follow would have kept
+printing.
+
+(Think of `Controller<LogsPage>` as an owning handle to a running child, a bit
+like a React ref to a component whose `useEffect` cleanup is tied to the ref
+being dropped — except here the compiler guarantees the cleanup runs.)
 
 ### `.clone()` on the Docker handle is not a copy
 
@@ -438,6 +494,15 @@ Exposed and fixed the two staleness bugs described above.
 - The `.desktop` is plain, not `.desktop.in`: no build system means nothing to
   substitute.
 
+**[#10] Streaming log view**
+
+- The last v1 feature and the first that streams. Clicking a row's logs button
+  pushes a `LogsPage` onto an `adw::NavigationView` (the list is now its root
+  page). It follows `docker.logs()` into a monospace `TextView`.
+- Uses `command` + `drop_on_shutdown` so the stream is cancelled exactly when
+  the page closes — verified: zero chunks after navigate-back, against a
+  container logging continuously. See "Streaming, and cancelling a stream".
+
 `cargo clippy --all-targets -- -D warnings` clean throughout.
 
 ### How the app finds its own icon (and why Wayland is the twist)
@@ -530,12 +595,8 @@ for driving the UI, not just for green builds.
 
 ### Next
 
-1. **Logs page** — the last v1 feature. `docker.logs()` with `follow: true`,
-   tail 200, pushed onto an `adw::NavigationView`. The first thing needing
-   `command` (a *stream*) rather than `oneshot_command` (one result), so it's
-   the natural place to learn that half of the API.
-2. **Empty state** — an `adw::StatusPage` for "no containers", which currently
-   renders as a blank group. Small.
+1. **Empty state** — an `adw::StatusPage` for "no containers", which currently
+   renders as a blank group. Small — and the last thing before v1 is complete.
 
 ### Later, deliberately
 
