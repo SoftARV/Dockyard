@@ -17,6 +17,7 @@ use relm4::{
 };
 use tracing::debug;
 
+use crate::components::container_detail::{ContainerDetailInit, ContainerDetailPage, DetailOutput};
 use crate::components::container_row::{
     ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
 };
@@ -58,6 +59,8 @@ pub struct AppModel {
     /// keeps its log stream alive — dropping it (on navigate-back) shuts the
     /// component down, which cancels the stream via `drop_on_shutdown`.
     logs: Option<Controller<LogsPage>>,
+    /// The detail page, while one is open — same lifetime story as `logs`.
+    detail: Option<Controller<ContainerDetailPage>>,
     /// Held so `update` can raise toasts. This is a refcounted GTK handle, not
     /// shared model state — cloning it is just a pointer bump, and it's the
     /// standard relm4 escape hatch for widgets that are commanded rather than
@@ -80,9 +83,11 @@ pub enum AppMsg {
     RemoveConfirmed(String),
     /// Open the logs page for a container.
     ShowLogs(String),
-    /// The logs page was popped (back button, Escape, swipe). Drops its
-    /// controller, which stops the stream.
-    LogsClosed,
+    /// Open the detail page for a container.
+    ShowDetails(String),
+    /// A pushed page (logs or detail) was popped — back button, Escape, swipe.
+    /// Drops whichever controller is open, which stops any stream it owns.
+    PageClosed,
     Error(String),
     /// The window became visible or stopped being visible. GTK reports this for
     /// minimised, fully obscured, *and* on-another-workspace — which is exactly
@@ -343,6 +348,7 @@ impl Component for AppModel {
                 ContainerRowOutput::Restart(id) => AppMsg::Restart(id),
                 ContainerRowOutput::Remove(id) => AppMsg::Remove(id),
                 ContainerRowOutput::ShowLogs(id) => AppMsg::ShowLogs(id),
+                ContainerRowOutput::ShowDetails(id) => AppMsg::ShowDetails(id),
             });
 
         let model = AppModel {
@@ -354,6 +360,7 @@ impl Component for AppModel {
             poll: None,
             nav: adw::NavigationView::new(),
             logs: None,
+            detail: None,
             toast_overlay: adw::ToastOverlay::new(),
         };
 
@@ -366,7 +373,7 @@ impl Component for AppModel {
         // let the reducer drop its controller and resume polling.
         let popped = sender.input_sender().clone();
         model.nav.connect_popped(move |_, _| {
-            popped.send(AppMsg::LogsClosed).ok();
+            popped.send(AppMsg::PageClosed).ok();
         });
 
         // Connecting touches the network, so it can't happen inline in `init`.
@@ -451,10 +458,35 @@ impl Component for AppModel {
                 self.stop_poll();
             }
 
-            AppMsg::LogsClosed => {
-                // Drops the controller -> shuts the component down -> the log
-                // stream's `drop_on_shutdown` cancels it. Resume the list.
+            AppMsg::ShowDetails(id) => {
+                let Some(docker) = self.docker.clone() else {
+                    return;
+                };
+                let Some(container) = self.containers.iter().find(|row| row.id() == id) else {
+                    return;
+                };
+
+                let controller = ContainerDetailPage::builder()
+                    .launch(ContainerDetailInit {
+                        docker,
+                        container: container.container().clone(),
+                    })
+                    // The detail page's start/stop button emits an intent; the
+                    // reducer dispatches it, same as a row.
+                    .forward(sender.input_sender(), |output| match output {
+                        DetailOutput::Start(id) => AppMsg::Start(id),
+                        DetailOutput::Stop(id) => AppMsg::Stop(id),
+                    });
+                self.nav.push(controller.widget());
+                self.detail = Some(controller);
+                self.stop_poll();
+            }
+
+            AppMsg::PageClosed => {
+                // Drop whichever page was open. Dropping its controller shuts
+                // the component down, cancelling any stream it owns (logs).
                 self.logs = None;
+                self.detail = None;
                 self.start_poll(&sender);
                 sender.input(AppMsg::Refresh);
             }

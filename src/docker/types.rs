@@ -5,7 +5,8 @@
 //! in sight, so the `view!` macro stays readable.
 
 use bollard::models::{
-    ContainerSummary, ContainerSummaryStateEnum, PortSummary, PortSummaryTypeEnum,
+    ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary,
+    ContainerSummaryStateEnum, PortSummary, PortSummaryTypeEnum,
 };
 
 /// Lifecycle state of a container.
@@ -36,6 +37,24 @@ impl ContainerState {
 impl From<ContainerSummaryStateEnum> for ContainerState {
     fn from(state: ContainerSummaryStateEnum) -> Self {
         use ContainerSummaryStateEnum as S;
+        match state {
+            S::CREATED => Self::Created,
+            S::RUNNING => Self::Running,
+            S::PAUSED => Self::Paused,
+            S::RESTARTING => Self::Restarting,
+            S::STOPPING => Self::Stopping,
+            S::EXITED => Self::Exited,
+            S::REMOVING => Self::Removing,
+            S::DEAD => Self::Dead,
+            S::EMPTY => Self::Unknown,
+        }
+    }
+}
+
+// The list and inspect use different-but-identical state enums.
+impl From<ContainerStateStatusEnum> for ContainerState {
+    fn from(state: ContainerStateStatusEnum) -> Self {
+        use ContainerStateStatusEnum as S;
         match state {
             S::CREATED => Self::Created,
             S::RUNNING => Self::Running,
@@ -139,6 +158,59 @@ impl Container {
             status: summary.status.unwrap_or_default(),
             ports,
         })
+    }
+}
+
+/// The extra fields `inspect` gives beyond the list summary. Kept separate from
+/// `Container` because the detail page fetches them lazily, one container at a
+/// time — the list never needs them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerDetail {
+    /// Current state, so a periodic re-inspect can keep the chip/button live.
+    pub state: ContainerState,
+    /// Start time as an RFC3339 string, for computing live uptime. `None` when
+    /// the container isn't running (a stopped container has no meaningful
+    /// uptime).
+    pub started_at: Option<String>,
+    /// Creation time, RFC3339.
+    pub created: Option<String>,
+    /// The full command line the container runs.
+    pub command: Option<String>,
+}
+
+impl ContainerDetail {
+    pub fn from_inspect(resp: ContainerInspectResponse) -> Self {
+        let state = resp.state.as_ref();
+        let running = state.and_then(|s| s.running).unwrap_or(false);
+
+        let container_state = state
+            .and_then(|s| s.status)
+            .map(ContainerState::from)
+            .unwrap_or(ContainerState::Unknown);
+
+        let started_at = running
+            .then(|| state.and_then(|s| s.started_at.clone()))
+            .flatten();
+
+        // Docker splits the command across entrypoint + cmd; join what's there
+        // into one line, matching how `docker ps` shows it.
+        let command = resp.config.as_ref().and_then(|config| {
+            let parts: Vec<&str> = config
+                .entrypoint
+                .iter()
+                .flatten()
+                .chain(config.cmd.iter().flatten())
+                .map(String::as_str)
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        });
+
+        Self {
+            state: container_state,
+            started_at,
+            created: resp.created,
+            command,
+        }
     }
 }
 

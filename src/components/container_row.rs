@@ -4,7 +4,8 @@ use relm4::adw::prelude::*;
 use relm4::factory::{DynamicIndex, FactoryComponent, FactorySender};
 use relm4::{adw, gtk};
 
-use crate::docker::types::{Container, ContainerState};
+use crate::components::status_chip;
+use crate::docker::types::Container;
 
 /// What a row asks the parent to do. Rows never touch Docker themselves — they
 /// emit an intent and `AppModel::update` owns the decision, which keeps all
@@ -16,6 +17,7 @@ pub enum ContainerRowOutput {
     Restart(String),
     Remove(String),
     ShowLogs(String),
+    ShowDetails(String),
 }
 
 /// What a row needs to exist. Carries `busy` so a row rebuilt while an action
@@ -79,6 +81,11 @@ impl ContainerRow {
         &self.container.name
     }
 
+    /// The row's container data, for handing to the detail page.
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
     /// "postgres:17-alpine · Up 39 minutes (healthy) · 5432:5432"
     fn subtitle(&self) -> String {
         let mut parts = vec![self.container.image.clone()];
@@ -100,28 +107,6 @@ impl ContainerRow {
 
         parts.join(" · ")
     }
-
-    /// libadwaita ships semantic colours for exactly this; no custom CSS needed.
-    fn status_icon(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Running => "media-playback-start-symbolic",
-            ContainerState::Paused => "media-playback-pause-symbolic",
-            ContainerState::Restarting | ContainerState::Stopping => "view-refresh-symbolic",
-            ContainerState::Dead => "dialog-error-symbolic",
-            _ => "media-playback-stop-symbolic",
-        }
-    }
-
-    fn status_css(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Running => "success",
-            ContainerState::Restarting | ContainerState::Stopping | ContainerState::Paused => {
-                "warning"
-            }
-            ContainerState::Dead => "error",
-            _ => "dim-label",
-        }
-    }
 }
 
 #[relm4::factory(pub)]
@@ -140,15 +125,21 @@ impl FactoryComponent for ContainerRow {
             set_subtitle: &self.subtitle(),
             set_subtitle_lines: 1,
 
-            add_prefix = &gtk::Image {
+            // Clicking the row body (not a suffix button) opens the detail page.
+            set_activatable: true,
+            connect_activated[sender, id = self.container.id.clone()] => move |_| {
+                sender.output(ContainerRowOutput::ShowDetails(id.clone())).ok();
+            },
+
+            // The status chip (same one the detail page uses) replaces the old
+            // coloured status icon. `set_css_classes` replaces the whole list,
+            // so the previous variant doesn't accumulate across state changes.
+            add_prefix = &gtk::Label {
+                set_valign: gtk::Align::Center,
                 #[watch]
-                set_icon_name: Some(self.status_icon()),
-                // `set_css_classes` replaces the list; `add_css_class` appends.
-                // Under #[watch] the appending form would accumulate, so a
-                // container that ran and then exited would end up styled both
-                // "success" and "dim-label" at once.
+                set_label: status_chip::label(self.container.state),
                 #[watch]
-                set_css_classes: &[self.status_css()],
+                set_css_classes: &["status-chip", status_chip::variant(self.container.state)],
             },
 
             // The button and its spinner share one Stack, so the row keeps a

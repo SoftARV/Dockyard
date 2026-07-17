@@ -10,13 +10,13 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
-    ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptions,
-    RestartContainerOptions, StartContainerOptions, StopContainerOptions,
+    InspectContainerOptions, ListContainersOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use tracing::{debug, info, warn};
 
-use super::types::Container;
+use super::types::{Container, ContainerDetail};
 
 const ROOTFUL_SOCKET: &str = "/var/run/docker.sock";
 
@@ -183,6 +183,15 @@ pub async fn remove_container(docker: &Docker, id: &str) -> Result<()> {
         .remove_container(id, None::<RemoveContainerOptions>)
         .await
         .map_err(rejected)
+}
+
+/// Fetch the extra detail the list doesn't carry (start time, command, ...).
+pub async fn inspect(docker: &Docker, id: &str) -> Result<ContainerDetail> {
+    let resp = docker
+        .inspect_container(id, None::<InspectContainerOptions>)
+        .await
+        .map_err(rejected)?;
+    Ok(ContainerDetail::from_inspect(resp))
 }
 
 /// Stream a container's logs: the last 200 lines, then live output as it
