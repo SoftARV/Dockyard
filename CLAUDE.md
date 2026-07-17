@@ -274,13 +274,17 @@ In scope for v1:
 **All three v1 features are built** (logs shipped in #10, with follow-scroll, a
 wrap toggle and a timestamp toggle). The `.desktop` file, icon, installer, and
 the "no containers" empty-state `adw::StatusPage` are all done too. v1 is
-complete; remaining ideas are v2 (events instead of polling).
+complete.
 
-**Explicitly out of scope** — do not build these, do not scaffold for them:
-image builds, `docker compose`, volumes, networks, registries, `exec` into a
-container, resource graphs, multi-host.
+**A reminder to stay lean, not a hard ban** (revised — was "explicitly out of
+scope"): image builds, `docker compose`, volumes, networks, registries, `exec`
+into a container, resource graphs, multi-host. These aren't the default focus —
+the app is a personal, single-machine container manager, not Docker Desktop. But
+the author may add any of them when it's genuinely useful to *them*.
 
-If a change looks like it's growing toward Docker Desktop, push back.
+So the rule is no longer "refuse." It's: when a change drifts toward Docker
+Desktop, **say so** — name the cost and the direction — so it's a conscious
+choice, then build it if the author wants it. Flag, don't gatekeep.
 
 ## Commands
 
