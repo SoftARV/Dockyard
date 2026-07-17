@@ -5,6 +5,8 @@
 //! inline — every Docker call is dispatched as a relm4 `Command` so the GTK main
 //! thread never blocks (CLAUDE.md rule 4).
 
+use std::collections::HashSet;
+
 use bollard::Docker;
 use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
@@ -12,7 +14,9 @@ use relm4::gtk::glib;
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
 use tracing::debug;
 
-use crate::components::container_row::{ContainerRow, ContainerRowInput, ContainerRowOutput};
+use crate::components::container_row::{
+    ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
+};
 use crate::docker::client;
 use crate::docker::types::Container;
 
@@ -29,6 +33,12 @@ pub struct AppModel {
     docker: Option<Docker>,
     containers: FactoryVecDeque<ContainerRow>,
     state: ViewState,
+    /// Containers with an action in flight. The rows own the spinner, but the
+    /// set lives here so a row rebuilt mid-action can be given its state back.
+    busy: HashSet<String>,
+    /// A refresh the user actually asked for. The 2s poll deliberately doesn't
+    /// set this: a spinner blinking every 2s forever is worse than no feedback.
+    refreshing: bool,
     /// Held so `update` can raise toasts. This is a refcounted GTK handle, not
     /// shared model state — cloning it is just a pointer bump, and it's the
     /// standard relm4 escape hatch for widgets that are commanded rather than
@@ -38,11 +48,17 @@ pub struct AppModel {
 
 #[derive(Debug)]
 pub enum AppMsg {
+    /// The 2s poll. Silent — no visible indicator.
     Refresh,
+    /// The user pressed the refresh button. Shows a spinner.
+    ManualRefresh,
     Start(String),
     Stop(String),
     Restart(String),
+    /// Asks for confirmation; does not remove anything.
     Remove(String),
+    /// The user confirmed the dialog. This is the one that actually removes.
+    RemoveConfirmed(String),
     ShowLogs(String),
     Error(String),
 }
@@ -54,8 +70,14 @@ pub enum AppMsg {
 pub enum CommandMsg {
     Connected(Box<Result<Docker, String>>),
     ContainersLoaded(Vec<Container>),
-    /// A one-shot action finished; refresh to pick up the new state.
-    ActionDone(Result<(), String>),
+    /// A one-shot action finished. Carries the id so the right row can stop
+    /// spinning — several containers can be mid-action at once.
+    ActionDone {
+        id: String,
+        result: Result<(), String>,
+    },
+    /// Listing failed. Distinct from `ActionDone` because no row owns it.
+    ListFailed(String),
 }
 
 /// The four lifecycle actions, which differ only in which client call they make.
@@ -73,23 +95,43 @@ impl AppModel {
         self.toast_overlay.add_toast(adw::Toast::new(message));
     }
 
-    /// Fire a container action off-thread and refresh once it lands.
-    fn dispatch(&self, sender: &ComponentSender<Self>, id: String, action: Action) {
+    /// Fire a container action off-thread, spinning the row until it lands.
+    fn dispatch(&mut self, sender: &ComponentSender<Self>, id: String, action: Action) {
         let Some(docker) = self.docker.clone() else {
             return;
         };
 
+        self.set_busy(&id, true);
+
+        let action_id = id.clone();
         sender.oneshot_command(async move {
             let result = match action {
-                Action::Start => client::start_container(&docker, &id).await,
-                Action::Stop => client::stop_container(&docker, &id).await,
-                Action::Restart => client::restart_container(&docker, &id).await,
-                Action::Remove => client::remove_container(&docker, &id).await,
+                Action::Start => client::start_container(&docker, &action_id).await,
+                Action::Stop => client::stop_container(&docker, &action_id).await,
+                Action::Restart => client::restart_container(&docker, &action_id).await,
+                Action::Remove => client::remove_container(&docker, &action_id).await,
             };
             // A container can vanish between the poll that drew the row and the
             // click on it, so failure here is routine, not exceptional.
-            CommandMsg::ActionDone(result.map_err(|err| format!("{err:#}")))
+            CommandMsg::ActionDone {
+                id: action_id,
+                result: result.map_err(|err| format!("{err:#}")),
+            }
         });
+    }
+
+    /// Track the action and tell the row to show or hide its spinner.
+    fn set_busy(&mut self, id: &str, busy: bool) {
+        if busy {
+            self.busy.insert(id.to_owned());
+        } else {
+            self.busy.remove(id);
+        }
+
+        if let Some(index) = self.containers.iter().position(|row| row.id() == id) {
+            self.containers
+                .send(index, ContainerRowInput::SetBusy(busy));
+        }
     }
 }
 
@@ -113,8 +155,21 @@ impl Component for AppModel {
                             set_icon_name: "view-refresh-symbolic",
                             set_tooltip_text: Some("Refresh"),
                             #[watch]
+                            set_visible: !model.refreshing,
+                            #[watch]
                             set_sensitive: model.docker.is_some(),
-                            connect_clicked => AppMsg::Refresh,
+                            connect_clicked => AppMsg::ManualRefresh,
+                        },
+
+                        // Only ever shown for a refresh the user asked for. A
+                        // local list call takes ~2ms so this usually isn't seen
+                        // at all — it earns its place when the daemon is slow.
+                        pack_end = &gtk::Spinner {
+                            #[watch]
+                            set_visible: model.refreshing,
+                            #[watch]
+                            set_spinning: model.refreshing,
+                            set_valign: gtk::Align::Center,
                         },
                     },
 
@@ -172,6 +227,8 @@ impl Component for AppModel {
             docker: None,
             containers,
             state: ViewState::Loading,
+            busy: HashSet::new(),
+            refreshing: false,
             toast_overlay: adw::ToastOverlay::new(),
         };
 
@@ -189,8 +246,13 @@ impl Component for AppModel {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match msg {
+            AppMsg::ManualRefresh => {
+                self.refreshing = true;
+                sender.input(AppMsg::Refresh);
+            }
+
             AppMsg::Refresh => {
                 let Some(docker) = self.docker.clone() else {
                     return;
@@ -201,7 +263,7 @@ impl Component for AppModel {
                 sender.oneshot_command(async move {
                     match client::list_containers(&docker).await {
                         Ok(containers) => CommandMsg::ContainersLoaded(containers),
-                        Err(err) => CommandMsg::ActionDone(Err(format!("{err:#}"))),
+                        Err(err) => CommandMsg::ListFailed(format!("{err:#}")),
                     }
                 });
             }
@@ -209,7 +271,38 @@ impl Component for AppModel {
             AppMsg::Start(id) => self.dispatch(&sender, id, Action::Start),
             AppMsg::Stop(id) => self.dispatch(&sender, id, Action::Stop),
             AppMsg::Restart(id) => self.dispatch(&sender, id, Action::Restart),
-            AppMsg::Remove(id) => self.dispatch(&sender, id, Action::Remove),
+            AppMsg::RemoveConfirmed(id) => self.dispatch(&sender, id, Action::Remove),
+
+            // Removal is destructive and irreversible, so it asks first.
+            AppMsg::Remove(id) => {
+                let name = self
+                    .containers
+                    .iter()
+                    .find(|row| row.id() == id)
+                    .map(|row| row.name().to_owned())
+                    .unwrap_or_else(|| id.chars().take(12).collect());
+
+                let dialog = adw::AlertDialog::new(
+                    Some("Remove container?"),
+                    Some(&format!(
+                        "“{name}” will be permanently removed. This can't be undone."
+                    )),
+                );
+                dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+                dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                // Both default and close land on cancel, so Esc or a stray
+                // Enter can't destroy anything.
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                let input = sender.input_sender().clone();
+                dialog.connect_response(None, move |_, response| {
+                    if response == "remove" {
+                        input.send(AppMsg::RemoveConfirmed(id.clone())).ok();
+                    }
+                });
+                dialog.present(Some(root));
+            }
 
             // TODO: push a logs page onto the NavigationView.
             AppMsg::ShowLogs(id) => {
@@ -282,15 +375,34 @@ impl Component for AppModel {
                     let mut guard = self.containers.guard();
                     guard.clear();
                     for container in containers {
-                        guard.push_back(container);
+                        // Hand the spinner state back, or a container being
+                        // removed would stop spinning the instant some *other*
+                        // container happened to appear.
+                        guard.push_back(ContainerRowInit {
+                            busy: self.busy.contains(&container.id),
+                            container,
+                        });
                     }
                 }
+
+                self.refreshing = false;
             }
 
-            CommandMsg::ActionDone(result) => {
+            CommandMsg::ActionDone { id, result } => {
+                self.set_busy(&id, false);
+
                 if let Err(err) = result {
                     sender.input(AppMsg::Error(err));
                 }
+
+                // Don't wait up to 2s for the poll to notice: the user just
+                // asked for this, so show the result now.
+                sender.input(AppMsg::Refresh);
+            }
+
+            CommandMsg::ListFailed(err) => {
+                self.refreshing = false;
+                sender.input(AppMsg::Error(err));
             }
         }
     }

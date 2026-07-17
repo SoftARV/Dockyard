@@ -7,9 +7,11 @@ edition = "2024"
 anyhow = "1"
 bollard = "0.21"
 futures-util = "0.3"
-# `gnome_45` == libadwaita 1.4, the minimum for adw::ToolbarView and
-# adw::NavigationView. Bumping this raises the libadwaita version users need.
-relm4 = { version = "0.11", features = ["libadwaita", "gnome_45"] }
+# `gnome_46` == libadwaita 1.5, needed for adw::AlertDialog. (1.4 would cover
+# adw::ToolbarView and adw::NavigationView.) This is the libadwaita version
+# users need installed, so raising it drops older distros; 1.5 ships in
+# GNOME 46 (Mar 2024) and Ubuntu 24.04 LTS.
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

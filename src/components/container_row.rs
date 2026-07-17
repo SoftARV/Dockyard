@@ -18,10 +18,20 @@ pub enum ContainerRowOutput {
     ShowLogs(String),
 }
 
+/// What a row needs to exist. Carries `busy` so a row rebuilt while an action
+/// is in flight doesn't lose its spinner.
+#[derive(Debug)]
+pub struct ContainerRowInit {
+    pub container: Container,
+    pub busy: bool,
+}
+
 #[derive(Debug)]
 pub enum ContainerRowInput {
     /// Fresh data for this row from the poll, applied in place.
     Update(Container),
+    /// An action on this container started or finished.
+    SetBusy(bool),
     /// The start/stop button was clicked.
     ///
     /// The decision deliberately happens here rather than in the button's
@@ -35,12 +45,19 @@ pub enum ContainerRowInput {
 #[derive(Debug)]
 pub struct ContainerRow {
     container: Container,
+    /// An action is in flight for this container. Owned by the row so it
+    /// survives an `Update` from the poll, which only replaces the container.
+    busy: bool,
 }
 
 impl ContainerRow {
     /// Lets the parent match rows against incoming containers without cloning.
     pub fn id(&self) -> &str {
         &self.container.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.container.name
     }
 
     /// "postgres:17-alpine · Up 39 minutes (healthy) · 5432:5432"
@@ -90,7 +107,7 @@ impl ContainerRow {
 
 #[relm4::factory(pub)]
 impl FactoryComponent for ContainerRow {
-    type Init = Container;
+    type Init = ContainerRowInit;
     type Input = ContainerRowInput;
     type Output = ContainerRowOutput;
     type CommandOutput = ();
@@ -115,7 +132,21 @@ impl FactoryComponent for ContainerRow {
                 set_css_classes: &[self.status_css()],
             },
 
+            // Stands in for the start/stop button while Docker works. Stopping a
+            // container can take the full 10s SIGTERM grace period before
+            // SIGKILL, which is long enough to look like nothing happened.
+            add_suffix = &gtk::Spinner {
+                #[watch]
+                set_visible: self.busy,
+                // Only spin when shown; a hidden spinner still burns frames.
+                #[watch]
+                set_spinning: self.busy,
+                set_valign: gtk::Align::Center,
+            },
+
             add_suffix = &gtk::Button {
+                #[watch]
+                set_visible: !self.busy,
                 #[watch]
                 set_icon_name: if self.container.state.is_running() {
                     "media-playback-stop-symbolic"
@@ -148,6 +179,9 @@ impl FactoryComponent for ContainerRow {
                 set_valign: gtk::Align::Center,
                 set_tooltip_text: Some("More"),
                 add_css_class: "flat",
+                // Don't offer restart/remove on a container mid-action.
+                #[watch]
+                set_sensitive: !self.busy,
 
                 #[wrap(Some)]
                 set_popover = &gtk::Popover {
@@ -177,12 +211,11 @@ impl FactoryComponent for ContainerRow {
         }
     }
 
-    fn init_model(
-        container: Self::Init,
-        _index: &DynamicIndex,
-        _sender: FactorySender<Self>,
-    ) -> Self {
-        Self { container }
+    fn init_model(init: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
+        Self {
+            container: init.container,
+            busy: init.busy,
+        }
     }
 
     fn update(&mut self, msg: Self::Input, sender: FactorySender<Self>) {
@@ -190,6 +223,8 @@ impl FactoryComponent for ContainerRow {
             // Swapping the data is enough: the #[watch] setters above re-run
             // against the new value and mutate only the widgets that changed.
             ContainerRowInput::Update(container) => self.container = container,
+
+            ContainerRowInput::SetBusy(busy) => self.busy = busy,
 
             ContainerRowInput::ToggleClicked => {
                 let id = self.container.id.clone();
