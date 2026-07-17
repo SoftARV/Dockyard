@@ -266,7 +266,7 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 | --- | --- |
 | App ID `dev.miguelrincon.Dockyard` | Chosen when the repo had no remote. `io.github.SoftARV.Dockyard` is now also defensible; changing it means updating `main.rs`, the `.desktop` name and the GResource prefix together. |
 | Poll every 2s, don't use events | CLAUDE.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
-| Rebuild the whole list each poll | At a handful of containers this is cheaper than diffing and keeps the reducer obvious. Revisit if it flickers. |
+| Update rows in place; rebuild only when membership changes | The first cut rebuilt every row on every poll. That destroys widgets 30 times a minute, and an open popover — parented to a row's menu button — died with it. Cheapness was never the issue; rebuilding throws away interaction state. |
 | `remove_container` isn't forced | Removing a running container should fail loudly rather than silently kill it. |
 | Sort by name | Docker returns newest-first; a list that reorders under your cursor every 2s is worse than a stable one. |
 | `tracing-subscriber` added | Not in CLAUDE.md's stack table, but `main.rs`'s job of "tracing init" is impossible without it. `env-filter` gives `RUST_LOG`. |
@@ -312,6 +312,21 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
 - `Remove` has no confirmation dialog. It's destructive and one click away.
+
+### A trap worth knowing: `#[watch]` and widget lifetime
+
+Rows persist across polls now, and two bugs were hiding behind the old rebuild:
+
+- **Closures capture once.** `connect_clicked[running = ...]` freezes `running`
+  at widget-build time. While rows were rebuilt every 2s that was invisible;
+  the moment they persist, the button offers the wrong action forever. Route
+  the click through an `Input` and read the model at click time instead.
+- **`add_css_class` appends, `set_css_classes` replaces.** Under `#[watch]` the
+  appending form accumulates, so a container that ran and then exited ends up
+  styled `success` *and* `dim-label`.
+
+The general lesson: rebuilding widgets hides staleness bugs. Stop rebuilding
+and they all surface at once.
 - The rootless socket path is only reachable on a rootless install; on this
   machine it's tested by faking `XDG_RUNTIME_DIR`.
 
