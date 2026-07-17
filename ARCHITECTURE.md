@@ -202,6 +202,13 @@ printing.
 like a React ref to a component whose `useEffect` cleanup is tied to the ref
 being dropped — except here the compiler guarantees the cleanup runs.)
 
+The **detail page's stats stream** is the same pattern, with one twist: it only
+streams while the container runs (Docker closes the stream when it stops), and a
+`stats_active` flag lets a later re-inspect restart it when the container comes
+back up. `drop_on_shutdown` still cancels it on navigate-back, and the graph
+data lives in the model, redrawn each sample via relm4's `DrawHandler` (a cairo
+surface) — no `Rc<RefCell>`.
+
 ### `.clone()` on the Docker handle is not a copy
 
 In `dispatch` and `AppMsg::Refresh`:
