@@ -32,6 +32,14 @@ pub struct LogsPage {
     /// Held so `update_cmd` can append to it off the view. A refcounted GTK
     /// handle, same escape hatch as `AppModel`'s `toast_overlay`.
     view: gtk::TextView,
+    /// A mark tracking the end of the buffer, used to follow the bottom.
+    ///
+    /// We scroll to this *mark* rather than to an iter because
+    /// `scroll_to_iter` silently does nothing while the view isn't laid out
+    /// yet — which is exactly the first-paint case, and why the view used to
+    /// open scrolled to the top. `scroll_to_mark` defers until the view is
+    /// realized, so the initial jump to the bottom actually lands.
+    bottom: gtk::TextMark,
 }
 
 /// Messages from the streaming command. Not `AppMsg`-style input — these arrive
@@ -87,9 +95,14 @@ impl Component for LogsPage {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let view = gtk::TextView::new();
+        let buffer = view.buffer();
+        // Right gravity (left_gravity = false) so the mark stays at the end as
+        // text is appended after it.
+        let bottom = buffer.create_mark(Some("bottom"), &buffer.end_iter(), false);
         let model = LogsPage {
             title: init.title,
             view: view.clone(),
+            bottom,
         };
         let widgets = view_output!();
 
@@ -152,10 +165,11 @@ impl LogsPage {
             buffer.delete(&mut start, &mut cut);
         }
 
-        // Follow: keep the newest line in view. Always scrolls to the bottom,
-        // like `docker logs -f` — reading scrollback while following isn't
-        // supported yet.
-        let mut end = buffer.end_iter();
-        self.view.scroll_to_iter(&mut end, 0.0, false, 0.0, 0.0);
+        // Follow: keep the newest line in view. `yalign: 1.0` aligns the mark to
+        // the bottom edge, so the latest line sits at the bottom — like
+        // `docker logs -f`. Always scrolls down; reading scrollback while
+        // following isn't supported yet.
+        buffer.move_mark(&self.bottom, &buffer.end_iter());
+        self.view.scroll_to_mark(&self.bottom, 0.0, true, 0.0, 1.0);
     }
 }
