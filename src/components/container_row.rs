@@ -16,6 +16,7 @@ pub enum ContainerRowOutput {
     Restart(String),
     Remove(String),
     ShowLogs(String),
+    ShowDetails(String),
 }
 
 /// What a row needs to exist. Carries `busy` so a row rebuilt while an action
@@ -79,6 +80,11 @@ impl ContainerRow {
         &self.container.name
     }
 
+    /// The row's container data, for handing to the detail page.
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
     /// "postgres:17-alpine · Up 39 minutes (healthy) · 5432:5432"
     fn subtitle(&self) -> String {
         let mut parts = vec![self.container.image.clone()];
@@ -139,6 +145,12 @@ impl FactoryComponent for ContainerRow {
             #[watch]
             set_subtitle: &self.subtitle(),
             set_subtitle_lines: 1,
+
+            // Clicking the row body (not a suffix button) opens the detail page.
+            set_activatable: true,
+            connect_activated[sender, id = self.container.id.clone()] => move |_| {
+                sender.output(ContainerRowOutput::ShowDetails(id.clone())).ok();
+            },
 
             add_prefix = &gtk::Image {
                 #[watch]

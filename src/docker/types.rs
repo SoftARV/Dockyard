@@ -5,7 +5,8 @@
 //! in sight, so the `view!` macro stays readable.
 
 use bollard::models::{
-    ContainerSummary, ContainerSummaryStateEnum, PortSummary, PortSummaryTypeEnum,
+    ContainerInspectResponse, ContainerSummary, ContainerSummaryStateEnum, PortSummary,
+    PortSummaryTypeEnum,
 };
 
 /// Lifecycle state of a container.
@@ -139,6 +140,51 @@ impl Container {
             status: summary.status.unwrap_or_default(),
             ports,
         })
+    }
+}
+
+/// The extra fields `inspect` gives beyond the list summary. Kept separate from
+/// `Container` because the detail page fetches them lazily, one container at a
+/// time — the list never needs them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerDetail {
+    /// Start time as an RFC3339 string, for computing live uptime. `None` when
+    /// the container isn't running (a stopped container has no meaningful
+    /// uptime).
+    pub started_at: Option<String>,
+    /// Creation time, RFC3339.
+    pub created: Option<String>,
+    /// The full command line the container runs.
+    pub command: Option<String>,
+}
+
+impl ContainerDetail {
+    pub fn from_inspect(resp: ContainerInspectResponse) -> Self {
+        let state = resp.state.as_ref();
+        let running = state.and_then(|s| s.running).unwrap_or(false);
+
+        let started_at = running
+            .then(|| state.and_then(|s| s.started_at.clone()))
+            .flatten();
+
+        // Docker splits the command across entrypoint + cmd; join what's there
+        // into one line, matching how `docker ps` shows it.
+        let command = resp.config.as_ref().and_then(|config| {
+            let parts: Vec<&str> = config
+                .entrypoint
+                .iter()
+                .flatten()
+                .chain(config.cmd.iter().flatten())
+                .map(String::as_str)
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        });
+
+        Self {
+            started_at,
+            created: resp.created,
+            command,
+        }
     }
 }
 
