@@ -98,20 +98,24 @@ main.rs  ->  app.rs  ->  components/container_row.rs
 
 Worth tracing once, because every feature follows this path.
 
-1. You click **Stop** on a row. The GTK button emits `clicked`.
-2. `container_row.rs` turns it into an intent and sends it *up*:
-   `sender.output(ContainerRowOutput::Stop(id))`. The row does **not** call
-   Docker. It doesn't know Docker exists.
+1. You click **Stop** on a row. The GTK button emits `clicked`, which sends
+   `ContainerRowInput::ToggleClicked` to the row itself.
+2. The row reads its *current* state to decide what that click meant, and sends
+   the intent *up*: `sender.output(ContainerRowOutput::Stop(id))`. The row does
+   **not** call Docker. It doesn't know Docker exists.
 3. `app.rs`'s `.forward(...)` maps that output into the parent's action:
    `ContainerRowOutput::Stop(id) => AppMsg::Stop(id)`.
 4. `AppModel::update` matches `AppMsg::Stop(id)` and calls `dispatch(...)`,
-   which spawns a **command** — an async task on a worker thread — and returns
+   which marks the container busy (the row swaps its button for a spinner),
+   spawns a **command** — an async task on a worker thread — and returns
    immediately. The reducer is done in microseconds.
 5. The task runs `client::stop_container(...).await` off the main thread, then
-   sends back a `CommandMsg::ActionDone(result)`.
+   sends back `CommandMsg::ActionDone { id, result }`.
 6. relm4 delivers that to `update_cmd` **on the main thread**, so it's safe to
-   touch the model and widgets there. Failure becomes a toast.
-7. The 2s poll picks up the container's new state and the row redraws.
+   touch the model and widgets there. The row stops spinning; a failure becomes
+   a toast.
+7. `update_cmd` fires an immediate `Refresh` rather than waiting up to 2s for
+   the poll, and the row redraws with the container's new state.
 
 The important shape: **rows emit intent, the root decides.** All Docker I/O
 lives in one reducer, so there's exactly one place where actions are ordered and
@@ -237,14 +241,57 @@ seconds. Docker calls take unbounded time, so they *all* go through commands,
 which run on tokio worker threads and post results back. That's what CLAUDE.md
 rule 4 protects.
 
+### Rebuilding widgets hides staleness bugs
+
+The first cut of the list rebuilt every row on every 2s poll. That looked
+harmless and was not: it destroyed and recreated every widget 30 times a
+minute, so an open popover — parented to a row's menu button — was torn down
+mid-interaction and appeared to close by itself.
+
+Rebuilding also *masked* two bugs, which surfaced the moment rows persisted:
+
+- **Closures capture once.** `connect_clicked[running = ...]` freezes `running`
+  at widget-build time. While rows were rebuilt every 2s that was invisible;
+  the moment they persist, the button offers the wrong action forever. Route
+  the click through an `Input` and read the model at click time instead.
+- **`add_css_class` appends, `set_css_classes` replaces.** Under `#[watch]` the
+  appending form accumulates, so a container that ran and then exited ends up
+  styled `success` *and* `dim-label`.
+
+If you ever find yourself rebuilding widgets to make state changes show up,
+that's a `#[watch]` you haven't written yet.
+
+### Swap widgets with a `gtk::Stack`, not with `visible`
+
+Toggling two widgets' `visible` looks like the obvious way to swap a button for
+a spinner. It isn't: they have different natural sizes (a flat icon button is
+~34px, a spinner ~16px), so the slot resizes and everything beside it jumps.
+
+A `gtk::Stack` is the tool — homogeneous by default, it allocates its largest
+child's size to every child, so the footprint is stable while the contents
+change. Set `visible_child_name` *after* adding the children; naming a child
+that doesn't exist yet is a GTK-CRITICAL.
+
 ### libadwaita versions are a build-time floor
 
-`adw::ToolbarView` and `adw::NavigationView` arrived in libadwaita **1.4**.
-relm4 gates them behind its `gnome_45` feature; the default `gnome_42` doesn't
-have them and the code won't compile. We pin `gnome_45` in `Cargo.toml` — the
-minimum for the widgets CLAUDE.md mandates, which keeps the app buildable on
-distros back to GNOME 45 (Sept 2023). Raising it raises what users need
-installed.
+relm4's `gnome_*` features gate which libadwaita widgets exist at all. The
+default is `gnome_42`, which doesn't have `adw::ToolbarView` or
+`adw::NavigationView` (libadwaita 1.4) — the code simply won't compile.
+
+We pin **`gnome_46`** (libadwaita 1.5), which `adw::AlertDialog` needs. This is
+a floor on what users must have installed, so it's a real cost, not just a
+number: GNOME 46 shipped Mar 2024 and is what Ubuntu 24.04 LTS carries. Raise
+it only for a widget you actually need.
+
+The version ladder is worth internalising, because it decides what you're
+allowed to use:
+
+| relm4 feature | libadwaita | Notable |
+| --- | --- | --- |
+| `gnome_42` (default) | 1.0 | `ActionRow`, `StatusPage`, `Toast` |
+| `gnome_45` | 1.4 | `ToolbarView`, `NavigationView` |
+| **`gnome_46`** ← us | **1.5** | **`AlertDialog`** |
+| `gnome_47` | 1.6 | `MessageDialog` becomes deprecated |
 
 Relatedly: **relm4 0.11's docs.rs build is broken**, so the web only documents
 0.10 and some of it is wrong for us. The reliable reference is the vendored
@@ -278,62 +325,75 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 
 ## Status and timeline
 
-### Done — 17 Jul 2026
+All dates 17 Jul 2026 — the app went from empty repo to working in one sitting.
 
-- **Scaffold.** Cargo project, pinned stack, `gnome_45`, `.gitignore`.
-  Required updating rustup's `stable` from 1.91 → 1.97; relm4 0.11 needs ≥1.93.
-- **Socket discovery** (`docker/client.rs`). All three branches exercised:
-  `DOCKER_HOST`, rootless, rootful. Plus `ping()` verification and actionable
-  errors for permission-denied / dead-daemon / no-socket. None panic.
-- **Type boundary** (`docker/types.rs`). bollard stops here.
-- **Container list.** `FactoryVecDeque<ContainerRow>` into an
-  `adw::PreferencesGroup`, 2s poll, status icon, ports, start/stop button and a
+### Shipped
+
+**[#1] Scaffold — connect to Docker and list containers**
+
+- Cargo project, pinned stack, `.gitignore`. Needed rustup `stable` 1.91 → 1.97,
+  because relm4 0.11 requires ≥1.93 and `cargo` refuses outright below it.
+- **Socket discovery** (`docker/client.rs`): `DOCKER_HOST` → rootless →
+  rootful, `ping()` verification, and errors that name their fix. All three
+  branches exercised; none panic.
+- **Type boundary** (`docker/types.rs`): bollard stops here.
+- **Container list**: `FactoryVecDeque<ContainerRow>` into an
+  `adw::PreferencesGroup`, 2s poll, status icon, ports, start/stop, and a
   restart/remove menu.
-- **Lifecycle actions.** start / stop / restart / remove, all off-thread, all
+- **Lifecycle actions**: start / stop / restart / remove, all off-thread, all
   failures becoming toasts.
-- **Action feedback.** Rows spin while an action is in flight and refresh the
-  moment it lands; the refresh button spins only when *you* asked for it.
-- **Remove confirms first**, via `adw::AlertDialog`, with Cancel as both the
-  default and close response.
 
-`cargo clippy -- -D warnings` clean.
+**[#2] Rows update in place**
+
+The poll rebuilt every row, destroying widgets 30 times a minute and closing
+any open popover. Now reconciled by id; rebuild only when membership changes.
+Exposed and fixed the two staleness bugs described above.
+
+**[#3] Action feedback and remove confirmation**
+
+- Rows spin while an action is in flight; `ActionDone` refreshes immediately
+  rather than waiting for the poll.
+- The refresh button spins only for a refresh *you* asked for.
+- Remove confirms via `adw::AlertDialog`. Raised the floor to `gnome_46`.
+- Fixed the menu not dismissing, and the action slot resizing mid-swap.
+
+`cargo clippy -- -D warnings` clean throughout.
+
+### What testing actually caught
+
+Worth recording, because it shaped how we work: **every bug so far was found by
+running the app, not by the compiler.** The popover closing, the missing
+feedback, the menu staying open, the slot shifting — clippy was clean for all
+four. Rust removes whole categories of bug, and none of them were these. Budget
+for driving the UI, not just for green builds.
 
 ### Next
 
 1. **Logs page** — the last v1 feature. `docker.logs()` with `follow: true`,
-   tail 200, pushed onto an `adw::NavigationView`. This is the first thing
-   needing `command` (a *stream*) rather than `oneshot_command` (one result),
-   so it's the natural place to learn that half of the API.
-2. **`.desktop` file** — `data/dev.miguelrincon.Dockyard.desktop.in` plus an
-   icon, so it launches from the app grid rather than a terminal.
-3. **Empty state** — an `adw::StatusPage` for "no containers", which currently
-   renders as a blank group.
+   tail 200, pushed onto an `adw::NavigationView`. The first thing needing
+   `command` (a *stream*) rather than `oneshot_command` (one result), so it's
+   the natural place to learn that half of the API.
+2. **Empty state** — an `adw::StatusPage` for "no containers", which currently
+   renders as a blank group. Small.
+3. **`.desktop` file** — `data/dev.miguelrincon.Dockyard.desktop.in` plus an
+   icon, so it launches from the app grid rather than a terminal. This is what
+   makes it stop feeling like a cargo project.
 
 ### Later, deliberately
 
-4. **Events instead of polling** — `docker.events()` via a `command`. Only after
-   polling is proven.
+4. **Events instead of polling** — `docker.events()` via a `command`. Only once
+   polling is proven, per CLAUDE.md phase 2.
 
 ### Known rough edges
 
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
 - Nothing shows progress for `ShowLogs`, because logs don't exist yet.
-
-### A trap worth knowing: `#[watch]` and widget lifetime
-
-Rows persist across polls now, and two bugs were hiding behind the old rebuild:
-
-- **Closures capture once.** `connect_clicked[running = ...]` freezes `running`
-  at widget-build time. While rows were rebuilt every 2s that was invisible;
-  the moment they persist, the button offers the wrong action forever. Route
-  the click through an `Input` and read the model at click time instead.
-- **`add_css_class` appends, `set_css_classes` replaces.** Under `#[watch]` the
-  appending form accumulates, so a container that ran and then exited ends up
-  styled `success` *and* `dim-label`.
-
-The general lesson: rebuilding widgets hides staleness bugs. Stop rebuilding
-and they all surface at once.
+- "No containers" renders as a blank group instead of an `adw::StatusPage`.
+- The row menu is a hand-built `gtk::Popover` of plain buttons, not a
+  `gtk::PopoverMenu` with a menu model. It works, but it needs manual
+  dismissal and lacks the keyboard and screen-reader behaviour a real menu
+  gets free. Worth converting if the menu grows past restart/remove.
 - The rootless socket path is only reachable on a rootless install; on this
   machine it's tested by faking `XDG_RUNTIME_DIR`.
 
