@@ -83,9 +83,11 @@ pub enum CommandMsg {
     Connected(Box<Result<Docker, String>>),
     ContainersLoaded(Vec<Container>),
     /// A one-shot action finished. Carries the id so the right row can stop
-    /// spinning — several containers can be mid-action at once.
+    /// spinning — several containers can be mid-action at once — and the action
+    /// so a failure can say which verb failed.
     ActionDone {
         id: String,
+        action: Action,
         result: Result<(), String>,
     },
     /// Listing failed. Distinct from `ActionDone` because no row owns it.
@@ -94,12 +96,27 @@ pub enum CommandMsg {
 
 /// The four lifecycle actions, which differ only in which client call they make.
 /// Collapsing them here keeps `update` from growing four near-identical arms.
+///
+/// `pub` only because it rides along in `CommandMsg`, which is the component's
+/// public `CommandOutput` type. The module itself isn't exported.
 #[derive(Debug, Clone, Copy)]
-enum Action {
+pub enum Action {
     Start,
     Stop,
     Restart,
     Remove,
+}
+
+impl Action {
+    /// For "Couldn't {verb} {name}: {reason}".
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+            Self::Remove => "remove",
+        }
+    }
 }
 
 impl AppModel {
@@ -127,7 +144,11 @@ impl AppModel {
             // click on it, so failure here is routine, not exceptional.
             CommandMsg::ActionDone {
                 id: action_id,
-                result: result.map_err(|err| format!("{err:#}")),
+                action,
+                // `{err}` not `{err:#}`: the client already reduced this to a
+                // toast-sized reason and logged the full text. Flattening the
+                // whole chain here is what made the toast 234 characters.
+                result: result.map_err(|err| format!("{err}")),
             }
         });
     }
@@ -162,6 +183,15 @@ impl AppModel {
             debug!("stopping poll");
             source.remove();
         }
+    }
+
+    /// The container's name, or a short id if its row has already gone.
+    fn name_of(&self, id: &str) -> String {
+        self.containers
+            .iter()
+            .find(|row| row.id() == id)
+            .map(|row| row.name().to_owned())
+            .unwrap_or_else(|| id.chars().take(12).collect())
     }
 
     /// Track the action and tell the row to show or hide its spinner.
@@ -308,7 +338,7 @@ impl Component for AppModel {
                 sender.oneshot_command(async move {
                     match client::list_containers(&docker).await {
                         Ok(containers) => CommandMsg::ContainersLoaded(containers),
-                        Err(err) => CommandMsg::ListFailed(format!("{err:#}")),
+                        Err(err) => CommandMsg::ListFailed(format!("{err}")),
                     }
                 });
             }
@@ -320,12 +350,7 @@ impl Component for AppModel {
 
             // Removal is destructive and irreversible, so it asks first.
             AppMsg::Remove(id) => {
-                let name = self
-                    .containers
-                    .iter()
-                    .find(|row| row.id() == id)
-                    .map(|row| row.name().to_owned())
-                    .unwrap_or_else(|| id.chars().take(12).collect());
+                let name = self.name_of(&id);
 
                 let dialog = adw::AlertDialog::new(
                     Some("Remove container?"),
@@ -452,11 +477,18 @@ impl Component for AppModel {
                 self.refreshing = false;
             }
 
-            CommandMsg::ActionDone { id, result } => {
+            CommandMsg::ActionDone { id, action, result } => {
                 self.set_busy(&id, false);
 
-                if let Err(err) = result {
-                    sender.input(AppMsg::Error(err));
+                if let Err(reason) = result {
+                    // Name the container rather than echoing Docker's 64-char
+                    // id. The row may already be gone, so fall back to a short
+                    // id — the toast still beats saying nothing.
+                    let name = self.name_of(&id);
+                    sender.input(AppMsg::Error(format!(
+                        "Couldn't {} {name}: {reason}",
+                        action.verb()
+                    )));
                 }
 
                 // Don't wait up to 2s for the poll to notice: the user just
@@ -464,9 +496,9 @@ impl Component for AppModel {
                 sender.input(AppMsg::Refresh);
             }
 
-            CommandMsg::ListFailed(err) => {
+            CommandMsg::ListFailed(reason) => {
                 self.refreshing = false;
-                sender.input(AppMsg::Error(err));
+                sender.input(AppMsg::Error(format!("Couldn't refresh: {reason}")));
             }
         }
     }
