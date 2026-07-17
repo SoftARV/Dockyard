@@ -35,10 +35,8 @@ install: build dev-install
 	@echo "Installed to $(PREFIX). Launch 'Dockyard' from the app grid, or run 'dockyard'."
 
 # Everything except the release binary: the .desktop entry and the icons.
-#
-# This is what makes the icon appear, including for `cargo run`. On Wayland
-# GNOME reads the icon from the installed .desktop matched by app_id, so once
-# this has run once, dev builds show the icon too — no release build needed.
+# Factored out so `install` isn't one long recipe. Not a way to get a dev-mode
+# icon — on Wayland only the fully installed app shows one (see main.rs).
 dev-install:
 	install -Dm644 data/$(APPID).desktop $(DATADIR)/applications/$(APPID).desktop
 	install -Dm644 data/icons/hicolor/scalable/apps/$(APPID).svg \

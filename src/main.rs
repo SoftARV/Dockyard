@@ -26,22 +26,18 @@ fn main() {
 
 /// Point GTK at our icon and name it as the default.
 ///
-/// Careful about what this does and doesn't buy, because it's not obvious. On
-/// **Wayland** — this machine — a client cannot set its own toplevel icon at
-/// all. GNOME Shell matches the running window to a `.desktop` file by its
-/// `app_id` (which equals [`APP_ID`]) and takes the icon from there. It reads
-/// those files from its *own* environment, fixed at login, so nothing the app
-/// does at runtime — search paths included — can supply one. The icon shows iff
-/// `dev.miguelrincon.Dockyard.desktop` is installed where the Shell looks
-/// (`make install`). Once it is, `cargo run` inherits the icon too, since the
-/// dev binary carries the same `app_id`.
+/// This does **not** put an icon on the window under Wayland — this machine's
+/// setup — and it's worth being blunt about that, because it looks like it
+/// should. On Wayland a client cannot set its own toplevel icon at all. GNOME
+/// Shell picks the icon by matching the window to an installed `.desktop`
+/// (partly on `app_id`, partly on the executable), so only the *installed* app
+/// shows an icon; `cargo run` never will, no matter what this function does.
 ///
-/// So why keep this? Two smaller reasons. On **X11** and some other
-/// compositors the app *does* set its own window icon from the theme, and there
-/// `set_default_icon_name` plus the dev search path make `cargo run` show it
-/// without installing. And the search path lets any *in-app* use of the icon
-/// (an about dialog, a status page) resolve it by name before install. On
-/// Wayland both are harmless no-ops for the window icon.
+/// It's kept because it's the standard idiom and it *does* work on **X11** and
+/// some other compositors, where a client sets its own window icon from the
+/// theme — `set_default_icon_name` names it, `add_search_path` lets the dev
+/// build resolve it pre-install. The search path also covers any future
+/// *in-app* icon use (an about dialog). All harmless no-ops on Wayland.
 ///
 /// Must run after `RelmApp::new`, which initialised GTK and the default display.
 fn setup_icon() {

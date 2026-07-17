@@ -27,14 +27,13 @@ with no sudo:
 
 ```bash
 make install     # build --release, copy to ~/.local, refresh caches
-make dev-install # just the .desktop + icons, no release build
 make uninstall   # remove everything it installed
 make check       # fmt --check + clippy --all-targets + test (the commit bar)
 ```
 
-On Wayland the window/app-grid icon comes from the installed `.desktop`, not
-from the running binary — so to see the icon under `cargo run`, run
-`make dev-install` once. See "How the app finds its own icon".
+The icon and app-grid launcher only appear for the **installed** app. On
+Wayland `cargo run` won't show the icon regardless — see "How the app finds its
+own icon". Install with `make install` and launch Dockyard from the app grid.
 
 **Only one copy runs at a time.** GTK apps register their app ID on D-Bus, so a
 second `cargo run` while the first is open silently hands off to the running
@@ -447,31 +446,29 @@ The instinct — "the app sets its window icon" — is **wrong on Wayland**, and
 getting this wrong cost a debugging round worth writing down.
 
 On Wayland a client *cannot* set its own toplevel icon. There's no protocol for
-it. GNOME Shell matches the running window to a `.desktop` file by its `app_id`
-(which equals `APP_ID`, confirmed: the app registers on the session bus as
-`dev.miguelrincon.Dockyard`), and takes the icon from that file's `Icon=`.
-Crucially the Shell reads `.desktop` files from *its own* environment, fixed at
-login — so nothing the app does at runtime, search paths included, can hand it
-one. **The icon shows iff the `.desktop` is installed where the Shell looks**
-(`~/.local/share/applications`, i.e. `make install` or `make dev-install`).
+it. GNOME Shell matches the running window to a `.desktop` file and takes the
+icon from that file's `Icon=`. **So only the installed app shows an icon —
+`cargo run` never does on Wayland**, and installing the `.desktop` doesn't
+change that, which is the part that's easy to get wrong.
 
-The happy consequence: because the dev binary carries the same `app_id`, once
-the `.desktop` is installed *once*, `cargo run` shows the icon too — the Shell
-matches it to the same file and doesn't care that `Exec=` points at the release
-binary.
+The matching is not purely `app_id`. GNOME also weighs the executable: our dev
+binary is `target/debug/dockyard`, the launcher's `Exec=` resolves to
+`~/.local/bin/dockyard`, and the mismatch is enough that the Shell treats a
+`cargo run` window as an unassociated app with no icon — even with the
+`.desktop` installed. (This was predicted to work and then tested; it doesn't.
+Two rounds of wrong model, so it's spelled out here.)
 
-So what is `setup_icon` in `main.rs` for? Two lesser things:
+So what is `setup_icon` in `main.rs` for? It's the standard idiom, and it *does*
+work on **X11** and some other compositors, where a client sets its own window
+icon from the theme: `set_default_icon_name(APP_ID)` names it and
+`add_search_path("data/icons")` lets the dev build resolve it pre-install. The
+search path also covers future *in-app* icon use. All harmless no-ops on
+Wayland.
 
-- `set_default_icon_name(APP_ID)` + `add_search_path("data/icons")` **do** work
-  on **X11** and some other compositors, where the client sets its own window
-  icon from the theme — there they make `cargo run` show it without installing.
-- The search path also lets any *in-app* use of the icon (an about dialog, a
-  status page) resolve it by name pre-install.
-
-On Wayland both are harmless no-ops for the window icon. The earlier version of
-this file claimed the search path made `cargo run` show the icon; it doesn't,
-and `IconTheme::has_icon` returning true was verifying the wrong layer — GTK
-*can* resolve the name, but the Shell never asks GTK.
+A verification lesson worth keeping: `IconTheme::has_icon` returning true only
+proved GTK could resolve the name — it never proved the icon would *appear*,
+because on Wayland the Shell decides the window icon and never asks GTK. Testing
+the resolvable layer felt like testing the visible one. It wasn't.
 
 The single shared string `dev.miguelrincon.Dockyard` is the app ID, the
 `.desktop` filename, the `Icon=` value, and the icon filename. That's not
