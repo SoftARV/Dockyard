@@ -163,9 +163,15 @@ src/
     container_row.rs   # FactoryComponent -> adw::ActionRow
     logs_page.rs       # streaming log view                        [not built]
 data/
-  dev.miguelrincon.Dockyard.desktop.in                             [not built]
-  icons/                                                           [not built]
+  dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
+  icons/hicolor/{16x16,...,512x512,scalable}/apps/dev.miguelrincon.Dockyard.{png,svg}
+Makefile             # make install -> ~/.local (no sudo); make uninstall; make check
 ```
+
+The `.desktop` file is deliberately **not** the `.desktop.in` this tree
+originally named. The `.in` suffix is a meson/autotools convention for
+build-time `@VARIABLE@` substitution; with only `cargo` and a fixed `~/.local`
+install there is nothing to substitute, so the template would be ceremony.
 
 Two notes on what this tree does *not* say:
 
@@ -265,8 +271,8 @@ In scope for v1:
 - ✅ Start / stop / restart / remove
 - ⬜ View logs (`docker.logs()` with `follow: true`, tail 200) — the last one
 
-Also still missing, both small: an `adw::StatusPage` for "no containers" (today
-it's a blank group), and the `.desktop` file.
+Also still missing, small: an `adw::StatusPage` for "no containers" (today it's
+a blank group). The `.desktop` file, icon and installer are done.
 
 **Explicitly out of scope** — do not build these, do not scaffold for them:
 image builds, `docker compose`, volumes, networks, registries, `exec` into a

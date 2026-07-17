@@ -22,6 +22,19 @@ cargo fmt                                # format
 cargo build --release                    # optimised binary at target/release/dockyard
 ```
 
+To install it as a real desktop app (icon, app-grid launcher), into `~/.local`
+with no sudo:
+
+```bash
+make install     # build --release, copy to ~/.local, refresh caches
+make uninstall   # remove everything it installed
+make check       # fmt --check + clippy --all-targets + test (the commit bar)
+```
+
+The icon and app-grid launcher only appear for the **installed** app. On
+Wayland `cargo run` won't show the icon regardless — see "How the app finds its
+own icon". Install with `make install` and launch Dockyard from the app grid.
+
 **Only one copy runs at a time.** GTK apps register their app ID on D-Bus, so a
 second `cargo run` while the first is open silently hands off to the running
 window and exits 0 — no error, no second window. If a run seems to do nothing,
@@ -74,13 +87,17 @@ Where the analogy breaks, and it matters:
 
 ```
 src/
-  main.rs                     bootstrap: tracing, RelmApp, app ID
+  main.rs                     bootstrap: tracing, RelmApp, app ID, icon
   app.rs                      root Component — the store + reducer + view
   docker/
     client.rs                 socket discovery, connect, ping, API wrappers
     types.rs                  our Container/ContainerState/Port
   components/
     container_row.rs          FactoryComponent -> adw::ActionRow
+data/
+  dev.miguelrincon.Dockyard.desktop    launcher entry
+  icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
+Makefile                      make install -> ~/.local; make uninstall; make check
 ```
 
 The dependency direction is strictly one-way:
@@ -406,7 +423,57 @@ Exposed and fixed the two staleness bugs described above.
 - Established that plain `cargo clippy` doesn't lint tests; the bar is now
   `--all-targets`.
 
+**[#8] Readable error toasts**
+
+- A failed remove produced a 234-char toast; the client now trims a bollard
+  error to its reason clause (`container is running`) and the app names the
+  container and verb. Verified end to end against the daemon: 51 chars.
+
+**[#9] Icon, `.desktop` entry, and a Makefile installer**
+
+- The app has an identity now: it shows its own icon and launches from the app
+  grid. Icons live under `data/icons/hicolor` named for the app ID — the shared
+  name is what ties launcher, window (Wayland `app_id`) and themed icon
+  together. `make install` lands everything in `~/.local` without sudo.
+- The `.desktop` is plain, not `.desktop.in`: no build system means nothing to
+  substitute.
+
 `cargo clippy --all-targets -- -D warnings` clean throughout.
+
+### How the app finds its own icon (and why Wayland is the twist)
+
+The instinct — "the app sets its window icon" — is **wrong on Wayland**, and
+getting this wrong cost a debugging round worth writing down.
+
+On Wayland a client *cannot* set its own toplevel icon. There's no protocol for
+it. GNOME Shell matches the running window to a `.desktop` file and takes the
+icon from that file's `Icon=`. **So only the installed app shows an icon —
+`cargo run` never does on Wayland**, and installing the `.desktop` doesn't
+change that, which is the part that's easy to get wrong.
+
+The matching is not purely `app_id`. GNOME also weighs the executable: our dev
+binary is `target/debug/dockyard`, the launcher's `Exec=` resolves to
+`~/.local/bin/dockyard`, and the mismatch is enough that the Shell treats a
+`cargo run` window as an unassociated app with no icon — even with the
+`.desktop` installed. (This was predicted to work and then tested; it doesn't.
+Two rounds of wrong model, so it's spelled out here.)
+
+So what is `setup_icon` in `main.rs` for? It's the standard idiom, and it *does*
+work on **X11** and some other compositors, where a client sets its own window
+icon from the theme: `set_default_icon_name(APP_ID)` names it and
+`add_search_path("data/icons")` lets the dev build resolve it pre-install. The
+search path also covers future *in-app* icon use. All harmless no-ops on
+Wayland.
+
+A verification lesson worth keeping: `IconTheme::has_icon` returning true only
+proved GTK could resolve the name — it never proved the icon would *appear*,
+because on Wayland the Shell decides the window icon and never asks GTK. Testing
+the resolvable layer felt like testing the visible one. It wasn't.
+
+The single shared string `dev.miguelrincon.Dockyard` is the app ID, the
+`.desktop` filename, the `Icon=` value, and the icon filename. That's not
+repetition — it's the join key GNOME uses to connect a running window to its
+launcher and icon, which is why no `StartupWMClass` is needed.
 
 ### Testing the parts the compiler can't reach
 
@@ -469,9 +536,6 @@ for driving the UI, not just for green builds.
    the natural place to learn that half of the API.
 2. **Empty state** — an `adw::StatusPage` for "no containers", which currently
    renders as a blank group. Small.
-3. **`.desktop` file** — `data/dev.miguelrincon.Dockyard.desktop.in` plus an
-   icon, so it launches from the app grid rather than a terminal. This is what
-   makes it stop feeling like a cargo project.
 
 ### Later, deliberately
 
