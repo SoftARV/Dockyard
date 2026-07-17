@@ -515,8 +515,14 @@ Exposed and fixed the two staleness bugs described above.
 
 `cargo clippy --all-targets -- -D warnings` clean throughout; 22 unit tests.
 
-**v1 feature-complete after #10** — list, start/stop/restart/remove, and logs
-are all built. Everything below is polish or explicitly-deferred v2 work.
+**[#12] Empty state** — "no containers" now shows an `adw::StatusPage` instead
+of a blank group. A `gtk::Stack` flips between the list and the status page on
+`containers.is_empty()`, rather than an `if` that would re-parent the factory's
+list widget every time the last container goes.
+
+**v1 feature-complete** — list, start/stop/restart/remove, logs, empty state,
+and desktop integration are all built. Everything below is polish or
+explicitly-deferred v2 work.
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
@@ -608,18 +614,18 @@ for driving the UI, not just for green builds.
 
 ### Next
 
-v1's scoped features are all done. What's left is polish, not scope:
+**v1 is complete** — list, lifecycle actions, logs, the empty state, and
+desktop integration are all done. What remains is minor polish:
 
-1. **Empty state** — an `adw::StatusPage` for "no containers", which currently
-   renders as a blank group. Small.
-2. **Follow-scroll refinement** — the timestamp toggle rebuild resets the scroll
-   position; minor. And the dim timestamp colour is a fixed grey, not
-   theme-adaptive (text tags take a colour, not a CSS class).
+- The timestamp toggle rebuild resets the scroll position.
+- The dim timestamp colour is a fixed grey, not theme-adaptive (text tags take
+  a colour, not a CSS class).
 
-### Later, deliberately
+### Later, deliberately (v2)
 
-4. **Events instead of polling** — `docker.events()` via a `command`. Only once
-   polling is proven, per CLAUDE.md phase 2.
+- **Events instead of polling** — `docker.events()` via a `command`. Only once
+  polling is proven, per CLAUDE.md phase 2. It's a latency win, not a resource
+  one — see "What the app actually costs".
 
 ### Known rough edges
 
@@ -632,13 +638,10 @@ v1's scoped features are all done. What's left is polish, not scope:
   what Docker reports, and still misleading. The absent port is the only tell.
   Surfacing it properly would mean inspecting networks, which CLAUDE.md puts
   out of scope, so this stays a known blind spot rather than a TODO.
-- Nothing shows progress for `ShowLogs`, because logs don't exist yet.
 - GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
   you minimise. Expected, not a bug — don't go looking for a faster signal.
-- `tokio` and `futures-util` are in `Cargo.toml` but unused by our code — relm4
-  owns the tokio runtime. `futures-util` will be needed for the logs stream;
-  `tokio` may never be.
-- "No containers" renders as a blank group instead of an `adw::StatusPage`.
+- `tokio` is in `Cargo.toml` but not used directly — relm4 owns the tokio
+  runtime. `futures-util` *is* used, by the logs stream.
 - The row menu is a hand-built `gtk::Popover` of plain buttons, not a
   `gtk::PopoverMenu` with a menu model. It works, but it needs manual
   dismissal and lacks the keyboard and screen-reader behaviour a real menu
