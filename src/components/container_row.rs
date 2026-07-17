@@ -50,6 +50,25 @@ pub struct ContainerRow {
     busy: bool,
 }
 
+/// Close the menu a button lives in.
+///
+/// A hand-built `gtk::Popover` full of plain buttons has no idea that clicking
+/// one ought to dismiss it — `autohide` only covers clicks *outside* the
+/// popover. A `gtk::PopoverMenu` driven by a menu model would dismiss itself,
+/// but that means GAction plumbing for a two-item menu, so we close it by hand.
+///
+/// The button can't hold a reference to its own popover (the popover is built
+/// around it), so walk up the widget tree instead. `ancestor` returns `None`
+/// rather than panicking if the shape ever changes.
+fn dismiss_menu(button: &gtk::Button) {
+    if let Some(popover) = button
+        .ancestor(gtk::Popover::static_type())
+        .and_downcast::<gtk::Popover>()
+    {
+        popover.popdown();
+    }
+}
+
 impl ContainerRow {
     /// Lets the parent match rows against incoming containers without cloning.
     pub fn id(&self) -> &str {
@@ -192,7 +211,8 @@ impl FactoryComponent for ContainerRow {
                         gtk::Button {
                             set_label: "Restart",
                             add_css_class: "flat",
-                            connect_clicked[sender, id = self.container.id.clone()] => move |_| {
+                            connect_clicked[sender, id = self.container.id.clone()] => move |button| {
+                                dismiss_menu(button);
                                 sender.output(ContainerRowOutput::Restart(id.clone())).ok();
                             },
                         },
@@ -201,7 +221,10 @@ impl FactoryComponent for ContainerRow {
                             set_label: "Remove",
                             add_css_class: "flat",
                             add_css_class: "destructive-action",
-                            connect_clicked[sender, id = self.container.id.clone()] => move |_| {
+                            // Dismiss before the dialog opens, so the menu isn't
+                            // left hanging behind it.
+                            connect_clicked[sender, id = self.container.id.clone()] => move |button| {
+                                dismiss_menu(button);
                                 sender.output(ContainerRowOutput::Remove(id.clone())).ok();
                             },
                         },
