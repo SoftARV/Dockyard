@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bollard::Docker;
+use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
     ListContainersOptionsBuilder, RemoveContainerOptions, RestartContainerOptions,
     StartContainerOptions, StopContainerOptions,
@@ -139,7 +140,7 @@ pub async fn list_containers(docker: &Docker) -> Result<Vec<Container>> {
     let summaries = docker
         .list_containers(Some(options))
         .await
-        .context("couldn't list containers")?;
+        .map_err(rejected)?;
 
     let mut containers: Vec<Container> = summaries
         .into_iter()
@@ -157,21 +158,21 @@ pub async fn start_container(docker: &Docker, id: &str) -> Result<()> {
     docker
         .start_container(id, None::<StartContainerOptions>)
         .await
-        .context("couldn't start the container")
+        .map_err(rejected)
 }
 
 pub async fn stop_container(docker: &Docker, id: &str) -> Result<()> {
     docker
         .stop_container(id, None::<StopContainerOptions>)
         .await
-        .context("couldn't stop the container")
+        .map_err(rejected)
 }
 
 pub async fn restart_container(docker: &Docker, id: &str) -> Result<()> {
     docker
         .restart_container(id, None::<RestartContainerOptions>)
         .await
-        .context("couldn't restart the container")
+        .map_err(rejected)
 }
 
 /// Remove a container. Not forced: removing a running container should fail
@@ -180,5 +181,139 @@ pub async fn remove_container(docker: &Docker, id: &str) -> Result<()> {
     docker
         .remove_container(id, None::<RemoveContainerOptions>)
         .await
-        .context("couldn't remove the container")
+        .map_err(rejected)
+}
+
+/// Log the whole failure, hand back only the part worth showing.
+fn rejected(err: BollardError) -> anyhow::Error {
+    warn!(?err, "docker rejected the request");
+    anyhow::anyhow!(short_reason(&err))
+}
+
+/// Reduce a Docker failure to something that fits on a toast.
+///
+/// Three layers conspire to make these unreadable. Docker writes for a
+/// terminal, quoting the full 64-character id back at you and spelling out the
+/// remedy; bollard prefixes `Docker responded with status code 409:`; and we
+/// used to add our own context on top. That's ~230 characters, and an
+/// `adw::Toast` is a single truncating line.
+///
+/// The caller already knows which container and which action — all that's
+/// missing is *why*. The full error still goes to the log via `rejected`.
+fn short_reason(err: &BollardError) -> String {
+    match err {
+        // The container was removed between the poll that drew the row and the
+        // click on it. Routine rather than exceptional (CLAUDE.md rule 5), and
+        // Docker's own wording here is a wall of id.
+        BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        } => "it no longer exists".to_owned(),
+
+        BollardError::DockerResponseServerError { message, .. } => reason_clause(message),
+
+        // Transport-level: the daemon died, the socket went away. Nothing in
+        // bollard's text is useful to a person.
+        _ => "Docker isn't responding".to_owned(),
+    }
+}
+
+/// Pull the reason out of Docker's `<action> "<id>": <reason>: <remedy>`.
+///
+/// Falls back to the whole message when it isn't shaped that way — a long toast
+/// beats a wrong one.
+fn reason_clause(message: &str) -> String {
+    let after_id = message.split_once("\": ").map_or(message, |(_, rest)| rest);
+    after_id
+        .split(':')
+        .next()
+        .unwrap_or(after_id)
+        .trim()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_error(status_code: u16, message: &str) -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code,
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn shortens_the_real_remove_refusal() {
+        // Captured verbatim from the daemon. Note it quotes the full 64-char id
+        // back, which is most of why the untrimmed toast ran to 234 characters.
+        let err = server_error(
+            409,
+            "cannot remove container \
+             \"f1635166cbf3f8c5a8a8ac3e39ab838f11cd610383bf6e0b8e3aabe1de1b0646\": \
+             container is running: stop the container before removing or force remove",
+        );
+        assert_eq!(short_reason(&err), "container is running");
+    }
+
+    #[test]
+    fn a_missing_container_is_not_worth_quoting_docker_over() {
+        let err = server_error(404, "No such container: dockyard-test");
+        assert_eq!(short_reason(&err), "it no longer exists");
+    }
+
+    #[test]
+    fn a_500_still_shows_the_daemon_message() {
+        // A server error carries a message, so it goes through the clause path
+        // rather than the catch-all — the daemon said something, show it.
+        let err = server_error(500, "server error");
+        assert_eq!(short_reason(&err), "server error");
+    }
+
+    #[test]
+    fn transport_failures_dont_leak_bollard_internals() {
+        // Not a DockerResponseServerError at all — the daemon never answered,
+        // so there's no message worth a person's time.
+        let err = BollardError::APIVersionParseError {};
+        assert_eq!(short_reason(&err), "Docker isn't responding");
+    }
+
+    #[test]
+    fn keeps_the_whole_message_when_it_isnt_the_expected_shape() {
+        // A long toast beats a wrong one.
+        let err = server_error(409, "something we have never seen before");
+        assert_eq!(short_reason(&err), "something we have never seen before");
+    }
+
+    #[test]
+    fn reason_clause_drops_the_id_and_the_remedy() {
+        assert_eq!(
+            reason_clause("cannot remove container \"abc\": container is running: stop it first"),
+            "container is running"
+        );
+    }
+
+    #[test]
+    fn reason_clause_survives_a_message_with_no_id() {
+        assert_eq!(
+            reason_clause("driver failed programming"),
+            "driver failed programming"
+        );
+    }
+
+    #[test]
+    fn the_result_actually_fits_a_toast() {
+        let err = server_error(
+            409,
+            "cannot remove container \
+             \"f1635166cbf3f8c5a8a8ac3e39ab838f11cd610383bf6e0b8e3aabe1de1b0646\": \
+             container is running: stop the container before removing or force remove",
+        );
+        // "Couldn't remove inventory_pos_db: " is ~33 chars; an adw::Toast
+        // truncates around 60-70 in a 540px window.
+        assert!(
+            short_reason(&err).len() <= 30,
+            "reason too long for a toast: {:?}",
+            short_reason(&err)
+        );
+    }
 }
