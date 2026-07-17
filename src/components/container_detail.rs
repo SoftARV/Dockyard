@@ -23,6 +23,8 @@ pub struct ContainerDetailInit {
 }
 
 pub struct ContainerDetailPage {
+    /// Kept for the periodic re-inspect. An `Arc`-backed handle, cheap to hold.
+    docker: Docker,
     container: Container,
     /// Filled in when `inspect` returns; `None` until then.
     detail: Option<ContainerDetail>,
@@ -35,6 +37,19 @@ pub struct ContainerDetailPage {
 pub enum DetailInput {
     /// The uptime timer fired; re-render (the `#[watch]` uptime recomputes).
     Tick,
+    /// The re-inspect timer fired; fetch fresh state so the chip/button/uptime
+    /// stay live (e.g. after the start/stop button, or an external change).
+    Refresh,
+    /// The start/stop button was clicked. Reads current state to decide which.
+    ToggleClicked,
+}
+
+/// Intents the page sends up. Like the row, the detail page never calls Docker
+/// itself — `AppModel` owns that (CLAUDE.md rule 4).
+#[derive(Debug)]
+pub enum DetailOutput {
+    Start(String),
+    Stop(String),
 }
 
 #[derive(Debug)]
@@ -46,7 +61,7 @@ pub enum DetailCmd {
 impl Component for ContainerDetailPage {
     type Init = ContainerDetailInit;
     type Input = DetailInput;
-    type Output = ();
+    type Output = DetailOutput;
     type CommandOutput = DetailCmd;
 
     view! {
@@ -54,7 +69,29 @@ impl Component for ContainerDetailPage {
             set_title: &model.container.name,
 
             adw::ToolbarView {
-                add_top_bar = &adw::HeaderBar {},
+                add_top_bar = &adw::HeaderBar {
+                    // Start/stop with an icon *and* a label. NavigationView owns
+                    // the start side (back button), so this sits at the end.
+                    pack_end = &gtk::Button {
+                        connect_clicked => DetailInput::ToggleClicked,
+
+                        #[wrap(Some)]
+                        set_child = &adw::ButtonContent {
+                            #[watch]
+                            set_icon_name: if model.container.state.is_running() {
+                                "media-playback-stop-symbolic"
+                            } else {
+                                "media-playback-start-symbolic"
+                            },
+                            #[watch]
+                            set_label: if model.container.state.is_running() {
+                                "Stop"
+                            } else {
+                                "Start"
+                            },
+                        },
+                    },
+                },
 
                 #[wrap(Some)]
                 set_content = &gtk::ScrolledWindow {
@@ -176,40 +213,58 @@ impl Component for ContainerDetailPage {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let model = ContainerDetailPage {
+            docker: init.docker,
             container: init.container,
             detail: None,
             started_unix: None,
         };
         let widgets = view_output!();
 
-        // Fetch the richer detail off-thread.
-        let docker = init.docker;
-        let id = model.container.id.clone();
-        sender.oneshot_command(async move {
-            DetailCmd::Inspected(
-                client::inspect(&docker, &id)
-                    .await
-                    .map_err(|err| format!("{err}")),
-            )
-        });
+        // Inspect once now, and re-inspect every 2s so the chip/button/uptime
+        // follow the container (the button's effect, or an external change).
+        sender.input(DetailInput::Refresh);
 
-        // Tick the uptime once a second. Held nowhere: the component owns the
-        // whole page, so the timer stops when the page (and this sender) is
-        // dropped on navigate-back.
+        // Two timers. Both self-remove when the page is dropped: sending to a
+        // closed input channel returns Err, which we turn into `Break`.
         let ticker = sender.input_sender().clone();
-        glib::timeout_add_seconds_local(1, move || {
-            ticker.send(DetailInput::Tick).ok();
-            glib::ControlFlow::Continue
+        glib::timeout_add_seconds_local(1, move || control_flow(ticker.send(DetailInput::Tick)));
+        let refresher = sender.input_sender().clone();
+        glib::timeout_add_seconds_local(2, move || {
+            control_flow(refresher.send(DetailInput::Refresh))
         });
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
             // Nothing to change — the `#[watch]` uptime setter re-runs on any
             // update and recomputes now − start.
             DetailInput::Tick => {}
+
+            DetailInput::ToggleClicked => {
+                // Decide here from current state, not in the button's closure,
+                // so it's never stale (same reason as the list row).
+                let id = self.container.id.clone();
+                let out = if self.container.state.is_running() {
+                    DetailOutput::Stop(id)
+                } else {
+                    DetailOutput::Start(id)
+                };
+                sender.output(out).ok();
+            }
+
+            DetailInput::Refresh => {
+                let docker = self.docker.clone();
+                let id = self.container.id.clone();
+                sender.oneshot_command(async move {
+                    DetailCmd::Inspected(
+                        client::inspect(&docker, &id)
+                            .await
+                            .map_err(|err| format!("{err}")),
+                    )
+                });
+            }
         }
     }
 
@@ -221,6 +276,8 @@ impl Component for ContainerDetailPage {
     ) {
         match msg {
             DetailCmd::Inspected(Ok(detail)) => {
+                // Keep the chip and start/stop button in sync with reality.
+                self.container.state = detail.state;
                 self.started_unix = detail.started_at.as_deref().and_then(parse_unix);
                 self.detail = Some(detail);
             }
@@ -229,6 +286,16 @@ impl Component for ContainerDetailPage {
                 tracing::warn!(%reason, "inspect failed; showing summary only");
             }
         }
+    }
+}
+
+/// Keep a repeating timer alive while its input channel is open; stop it once
+/// the channel closes (the page was dropped). Saves holding the `SourceId`.
+fn control_flow<E>(send_result: Result<(), E>) -> glib::ControlFlow {
+    if send_result.is_ok() {
+        glib::ControlFlow::Continue
+    } else {
+        glib::ControlFlow::Break
     }
 }
 

@@ -17,7 +17,7 @@ use relm4::{
 };
 use tracing::debug;
 
-use crate::components::container_detail::{ContainerDetailInit, ContainerDetailPage};
+use crate::components::container_detail::{ContainerDetailInit, ContainerDetailPage, DetailOutput};
 use crate::components::container_row::{
     ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
 };
@@ -471,7 +471,12 @@ impl Component for AppModel {
                         docker,
                         container: container.container().clone(),
                     })
-                    .detach();
+                    // The detail page's start/stop button emits an intent; the
+                    // reducer dispatches it, same as a row.
+                    .forward(sender.input_sender(), |output| match output {
+                        DetailOutput::Start(id) => AppMsg::Start(id),
+                        DetailOutput::Stop(id) => AppMsg::Stop(id),
+                    });
                 self.nav.push(controller.widget());
                 self.detail = Some(controller);
                 self.stop_poll();
