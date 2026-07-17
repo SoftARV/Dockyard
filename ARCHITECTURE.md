@@ -30,7 +30,7 @@ that's why. Close the first window, or:
 pkill -f target/debug/dockyard
 ```
 
-Requirements: Rust ≥ 1.93, gtk4 ≥ 4.10, libadwaita ≥ 1.4, and a reachable Docker
+Requirements: Rust ≥ 1.93, gtk4 ≥ 4.10, libadwaita ≥ 1.5, and a reachable Docker
 daemon. On Arch/CachyOS:
 
 ```bash
@@ -266,6 +266,9 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 | --- | --- |
 | App ID `dev.miguelrincon.Dockyard` | Chosen when the repo had no remote. `io.github.SoftARV.Dockyard` is now also defensible; changing it means updating `main.rs`, the `.desktop` name and the GResource prefix together. |
 | Poll every 2s, don't use events | CLAUDE.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
+| The poll is silent; only user-initiated refresh spins | A spinner blinking every 2s forever is worse than no feedback. `AppMsg::ManualRefresh` exists purely to draw that line. |
+| Actions refresh immediately on completion | Waiting up to 2s for the next poll made even fast actions feel broken. |
+| `gnome_46` for `adw::AlertDialog` | `AlertDialog` needs libadwaita 1.5. `MessageDialog` works at 1.4 but is deprecated from 1.6, so it would break `clippy -D warnings` on any later bump. Floor is GNOME 46 (Mar 2024) = Ubuntu 24.04 LTS. |
 | Update rows in place; rebuild only when membership changes | The first cut rebuilt every row on every poll. That destroys widgets 30 times a minute, and an open popover — parented to a row's menu button — died with it. Cheapness was never the issue; rebuilding throws away interaction state. |
 | `remove_container` isn't forced | Removing a running container should fail loudly rather than silently kill it. |
 | Sort by name | Docker returns newest-first; a list that reorders under your cursor every 2s is worse than a stable one. |
@@ -288,6 +291,10 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
   restart/remove menu.
 - **Lifecycle actions.** start / stop / restart / remove, all off-thread, all
   failures becoming toasts.
+- **Action feedback.** Rows spin while an action is in flight and refresh the
+  moment it lands; the refresh button spins only when *you* asked for it.
+- **Remove confirms first**, via `adw::AlertDialog`, with Cancel as both the
+  default and close response.
 
 `cargo clippy -- -D warnings` clean.
 
@@ -311,7 +318,7 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
-- `Remove` has no confirmation dialog. It's destructive and one click away.
+- Nothing shows progress for `ShowLogs`, because logs don't exist yet.
 
 ### A trap worth knowing: `#[watch]` and widget lifetime
 
