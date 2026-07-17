@@ -21,7 +21,7 @@ use relm4::{
     adw, gtk,
 };
 
-use crate::components::logs_view::{LogsInit, LogsView};
+use crate::components::logs_view::{LogsInit, LogsInput, LogsView};
 use crate::components::status_chip;
 use crate::docker::client;
 use crate::docker::types::{Container, ContainerDetail, Stats};
@@ -481,8 +481,12 @@ impl Component for ContainerDetailPage {
                 self.started_unix = detail.started_at.as_deref().and_then(parse_unix);
                 self.detail = Some(detail);
                 // If it just came up (via the button or elsewhere), (re)start
-                // the graphs.
+                // the graphs and the log stream. Both self-guard against a
+                // double subscribe, so sending on every running poll is fine.
                 self.start_stats(&sender);
+                if self.container.state.is_running() {
+                    self.logs.sender().emit(LogsInput::EnsureStreaming);
+                }
             }
             DetailCmd::Inspected(Err(reason)) => {
                 // The basic info (from the list) still shows; just note the gap.

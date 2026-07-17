@@ -36,6 +36,14 @@ pub struct LogsInit {
 }
 
 pub struct LogsView {
+    /// Kept so the stream can be reopened later — `docker logs --follow` on a
+    /// stopped container returns what exists and ends, so when the detail page
+    /// starts the container we re-subscribe. An `Arc`-backed handle, cheap.
+    docker: Docker,
+    id: String,
+    /// Whether a log stream is currently running, so `EnsureStreaming` doesn't
+    /// open a second one over the first (the stats stream uses the same guard).
+    streaming: bool,
     /// Long lines wrap. Toggled from the header, drives wrap mode via `#[watch]`.
     wrap: bool,
     /// Pinned to the bottom (following). False while the user reads scrollback,
@@ -57,6 +65,10 @@ pub struct LogsView {
 
 #[derive(Debug)]
 pub enum LogsInput {
+    /// Open the log stream if one isn't already running. Sent by the detail
+    /// page whenever it sees the container is up, so logs come alive when the
+    /// container is started from within the detail view.
+    EnsureStreaming,
     SetWrap(bool),
     SetTimestamps(bool),
     /// The scroll position changed; recompute whether we're at the bottom.
@@ -185,6 +197,9 @@ impl Component for LogsView {
         });
 
         let mut model = LogsView {
+            docker: init.docker,
+            id: init.id,
+            streaming: false,
             wrap: true,
             follow: true,
             view: view.clone(),
@@ -209,34 +224,17 @@ impl Component for LogsView {
             model.vadj = Some(vadj);
         }
 
-        // The streaming command. `docker` and `id` are moved in and owned by the
-        // async block, so the borrowing stream stays valid for the whole loop.
-        let docker = init.docker;
-        let id = init.id;
-        sender.command(move |out, shutdown| {
-            shutdown
-                .register(async move {
-                    let mut stream = client::logs(&docker, &id);
-                    while let Some(item) = stream.next().await {
-                        let msg = match item {
-                            Ok(chunk) => LogsCmd::Chunk(chunk),
-                            Err(reason) => LogsCmd::Failed(reason),
-                        };
-                        if out.send(msg).is_err() {
-                            return;
-                        }
-                    }
-                    out.send(LogsCmd::Ended).ok();
-                })
-                .drop_on_shutdown()
-                .boxed()
-        });
+        // Open the stream now. If the container is stopped, Docker returns the
+        // existing logs and closes it; the detail page revives it later.
+        model.start_stream(&sender);
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
+            LogsInput::EnsureStreaming => self.start_stream(&sender),
+
             LogsInput::SetWrap(wrap) => self.wrap = wrap,
 
             LogsInput::SetTimestamps(show) => {
@@ -276,10 +274,12 @@ impl Component for LogsView {
         match msg {
             LogsCmd::Chunk(text) => self.feed(&text),
             LogsCmd::Failed(reason) => {
+                self.streaming = false;
                 self.flush_pending();
                 self.insert(None, &format!("— stream error: {reason} —"));
             }
             LogsCmd::Ended => {
+                self.streaming = false;
                 self.flush_pending();
                 self.insert(None, "— end of logs —");
             }
@@ -315,6 +315,46 @@ fn hms(stamp: &str) -> Option<String> {
 }
 
 impl LogsView {
+    /// (Re)open the container's log stream, unless one is already running.
+    ///
+    /// Called on init and whenever the detail page reports the container is up.
+    /// The buffer is cleared first: a restarted container re-serves its pre-stop
+    /// tail (Docker's `--tail` doesn't reset across stop/start), so keeping the
+    /// old content would duplicate it. The stream borrows `docker`/`id`, so the
+    /// async block owns clones for as long as it polls.
+    fn start_stream(&mut self, sender: &ComponentSender<Self>) {
+        if self.streaming {
+            return;
+        }
+        self.streaming = true;
+
+        // Fresh slate for this run, and re-pin to the bottom.
+        self.view.buffer().set_text("");
+        self.pending.clear();
+        self.follow = true;
+
+        let docker = self.docker.clone();
+        let id = self.id.clone();
+        sender.command(move |out, shutdown| {
+            shutdown
+                .register(async move {
+                    let mut stream = client::logs(&docker, &id);
+                    while let Some(item) = stream.next().await {
+                        let msg = match item {
+                            Ok(chunk) => LogsCmd::Chunk(chunk),
+                            Err(reason) => LogsCmd::Failed(reason),
+                        };
+                        if out.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                    out.send(LogsCmd::Ended).ok();
+                })
+                .drop_on_shutdown()
+                .boxed()
+        });
+    }
+
     /// Break a chunk into whole lines, buffering any trailing partial one.
     fn feed(&mut self, chunk: &str) {
         self.pending.push_str(chunk);
