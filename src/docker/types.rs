@@ -141,3 +141,148 @@ impl Container {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A summary with only an id — every other field `None`, which is exactly
+    /// the shape the Docker API is allowed to hand us.
+    fn bare(id: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    fn port(private: u16, public: Option<u16>, ip: &str) -> PortSummary {
+        PortSummary {
+            ip: Some(ip.to_owned()),
+            private_port: private,
+            public_port: public,
+            typ: Some(PortSummaryTypeEnum::TCP),
+        }
+    }
+
+    #[test]
+    fn drops_a_summary_with_no_id() {
+        // Every action keys off the id, so a row for this could never work.
+        let summary = ContainerSummary {
+            names: Some(vec!["/orphan".to_owned()]),
+            ..Default::default()
+        };
+        assert!(Container::from_summary(summary).is_none());
+    }
+
+    #[test]
+    fn strips_the_leading_slash_docker_puts_on_names() {
+        let summary = ContainerSummary {
+            names: Some(vec!["/inventory_pos_db".to_owned()]),
+            ..bare("abc123")
+        };
+        let container = Container::from_summary(summary).expect("has an id");
+        assert_eq!(container.name, "inventory_pos_db");
+    }
+
+    #[test]
+    fn takes_the_first_name_when_a_container_has_several() {
+        let summary = ContainerSummary {
+            names: Some(vec!["/first".to_owned(), "/second".to_owned()]),
+            ..bare("abc123")
+        };
+        let container = Container::from_summary(summary).expect("has an id");
+        assert_eq!(container.name, "first");
+    }
+
+    #[test]
+    fn falls_back_to_a_short_id_when_unnamed() {
+        let container = Container::from_summary(bare("0123456789abcdef0123")).expect("has an id");
+        assert_eq!(container.name, "0123456789ab", "should be 12 chars of id");
+    }
+
+    #[test]
+    fn dedupes_the_same_mapping_on_ipv4_and_ipv6() {
+        // Docker reports one mapping per host interface. Rendering both would
+        // put a duplicate "8080:80" in the row's subtitle.
+        let summary = ContainerSummary {
+            ports: Some(vec![
+                port(80, Some(8080), "0.0.0.0"),
+                port(80, Some(8080), "::"),
+            ]),
+            ..bare("abc123")
+        };
+        let container = Container::from_summary(summary).expect("has an id");
+        assert_eq!(container.ports.len(), 1);
+        assert_eq!(container.ports[0].public, 8080);
+        assert_eq!(container.ports[0].private, 80);
+    }
+
+    #[test]
+    fn drops_unpublished_ports() {
+        // No public port means it isn't reachable from the host, so there's
+        // nothing worth showing.
+        let summary = ContainerSummary {
+            ports: Some(vec![port(5432, None, "0.0.0.0")]),
+            ..bare("abc123")
+        };
+        let container = Container::from_summary(summary).expect("has an id");
+        assert!(container.ports.is_empty());
+    }
+
+    #[test]
+    fn keeps_distinct_ports_and_sorts_them() {
+        let summary = ContainerSummary {
+            ports: Some(vec![
+                port(443, Some(8443), "0.0.0.0"),
+                port(80, Some(8080), "0.0.0.0"),
+            ]),
+            ..bare("abc123")
+        };
+        let container = Container::from_summary(summary).expect("has an id");
+        assert_eq!(container.ports.len(), 2);
+        assert_eq!(container.ports[0].public, 8080, "sorted by public port");
+        assert_eq!(container.ports[1].public, 8443);
+    }
+
+    #[test]
+    fn missing_state_is_unknown_not_a_guess() {
+        let container = Container::from_summary(bare("abc123")).expect("has an id");
+        assert_eq!(container.state, ContainerState::Unknown);
+        assert!(!container.state.is_running());
+    }
+
+    #[test]
+    fn maps_docker_states_we_act_on() {
+        use ContainerSummaryStateEnum as S;
+        let cases = [
+            (S::RUNNING, ContainerState::Running, true),
+            (S::EXITED, ContainerState::Exited, false),
+            (S::PAUSED, ContainerState::Paused, false),
+            (S::DEAD, ContainerState::Dead, false),
+            // Restarting counts as running, so the button offers "stop".
+            (S::RESTARTING, ContainerState::Restarting, true),
+            // Docker's empty string means "no state", not a state called "".
+            (S::EMPTY, ContainerState::Unknown, false),
+        ];
+
+        for (docker_state, expected, running) in cases {
+            let summary = ContainerSummary {
+                state: Some(docker_state),
+                ..bare("abc123")
+            };
+            let container = Container::from_summary(summary).expect("has an id");
+            assert_eq!(container.state, expected, "mapping {docker_state:?}");
+            assert_eq!(
+                container.state.is_running(),
+                running,
+                "for {docker_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_image_does_not_render_an_empty_subtitle() {
+        let container = Container::from_summary(bare("abc123")).expect("has an id");
+        assert_eq!(container.image, "<unknown>");
+    }
+}

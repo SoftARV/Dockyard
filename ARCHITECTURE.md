@@ -14,11 +14,12 @@ that comparison where it genuinely helps and says so when the analogy breaks.
 ## Running it
 
 ```bash
-cargo run                     # dev build, launches the window
-RUST_LOG=debug cargo run      # same, with our tracing logs on stdout
-cargo clippy -- -D warnings   # the bar that must pass before any commit
-cargo fmt                     # format
-cargo build --release         # optimised binary at target/release/dockyard
+cargo run                                # dev build, launches the window
+RUST_LOG=debug cargo run                 # same, with our tracing logs on stdout
+cargo test                               # unit tests; no daemon needed
+cargo clippy --all-targets -- -D warnings  # the bar. --all-targets also lints tests
+cargo fmt                                # format
+cargo build --release                    # optimised binary at target/release/dockyard
 ```
 
 **Only one copy runs at a time.** GTK apps register their app ID on D-Bus, so a
@@ -233,6 +234,41 @@ So `client.rs::diagnose` probes the socket on the error path to read the real
 errno and says `sudo usermod -aG docker $USER` instead of "Docker isn't
 reachable". Same for a stopped daemon (`ECONNREFUSED`).
 
+### What the app actually costs
+
+Measured, not guessed — release build, three interleaved 90s runs, sampling
+`/proc/<pid>/stat`:
+
+| | CPU (one core) | wakeups/s | RSS |
+| --- | --- | --- | --- |
+| poll every 2s | **~0.085%** | ~2.6 | 107.9 MB |
+| poll off | ~0.004% | ~0.3 | 107.8 MB |
+
+Read that carefully, because it's counterintuitive:
+
+- **The poll costs ~1 second of CPU every 20 minutes.** Each tick is ~1ms: one
+  HTTP request over a unix socket plus a JSON parse.
+- **It costs zero memory.** RSS is identical with it on and off, and doesn't
+  grow — the per-poll `String`s aren't leaking.
+- **108 MB is the price of GTK**, not of anything we wrote. gnome-calendar, a
+  first-party GTK4/libadwaita app, sits at 82 MB. If "lightweight" means
+  memory, the app *is* GTK and there's no polling decision that changes it.
+
+So the poll is optimised for **wakeups, not cycles**. ~2.6/s forever, including
+for a window minimised on another workspace, is what costs laptop battery —
+waking the CPU out of deep C-states. `is_suspended` gating removes the timer
+outright whenever the window isn't visible; a timer that fires is a wakeup even
+if it decides to do nothing.
+
+Two methodology notes, learned the hard way:
+
+- **One sample is worthless here.** The first release run showed `poll=off`
+  using *6× more* CPU than `poll=2s`. Pure noise: `CLK_TCK` is 100, so a tick
+  is 10ms and the entire signal is 3–10 ticks. Only repeated interleaved runs
+  separated signal from noise.
+- **Measure the binary you shipped.** An early run tested a stale binary
+  because a `pkill` in the command chain killed the `cargo build` before it ran.
+
 ### Never block the main thread
 
 GTK is single-threaded: one thread owns every widget and paints every frame. If
@@ -389,6 +425,15 @@ for driving the UI, not just for green builds.
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
 - Nothing shows progress for `ShowLogs`, because logs don't exist yet.
+- The poll's *resume* path (window restored -> polling restarts) is unverified:
+  Wayland refuses a programmatic `present()`, so no script can restore a window
+  to test it. Suspend -> stop is verified. If the app ever looks frozen after
+  un-minimising, this is the first place to look.
+- GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
+  you minimise.
+- `tokio` and `futures-util` are in `Cargo.toml` but unused by our code — relm4
+  owns the tokio runtime. `futures-util` will be needed for the logs stream;
+  `tokio` may never be.
 - "No containers" renders as a blank group instead of an `adw::StatusPage`.
 - The row menu is a hand-built `gtk::Popover` of plain buttons, not a
   `gtk::PopoverMenu` with a menu model. It works, but it needs manual
