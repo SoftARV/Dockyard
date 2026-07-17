@@ -21,7 +21,32 @@ fn main() {
     // rather than a `gtk::Application`. So there's deliberately no adw init here.
     let app = RelmApp::new(APP_ID);
     setup_icon();
+    load_css();
     app.run::<app::AppModel>(());
+}
+
+/// Our only custom CSS: the status chip on the detail page.
+///
+/// libadwaita has no chip/badge widget for a filled, coloured status pill (its
+/// `.badge` class is wired to the view-switcher's number bubble), and the colour
+/// classes only tint text. So this is the CLAUDE.md-sanctioned exception — "no
+/// libadwaita widget for the job". Colours come from Adwaita's own named colours,
+/// so the chip follows the theme (light/dark) for free.
+const CSS: &str = "
+.status-chip {
+    border-radius: 9999px;
+    padding: 2px 10px;
+    font-weight: bold;
+    font-size: 0.8em;
+}
+.status-chip.running { background-color: @success_bg_color; color: @success_fg_color; }
+.status-chip.warning { background-color: @warning_bg_color; color: @warning_fg_color; }
+.status-chip.error   { background-color: @error_bg_color;   color: @error_fg_color; }
+.status-chip.neutral { background-color: alpha(@window_fg_color, 0.12); color: @window_fg_color; }
+";
+
+fn load_css() {
+    relm4::set_global_css(CSS);
 }
 
 /// Point GTK at our icon and name it as the default.

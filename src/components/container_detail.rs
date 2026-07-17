@@ -60,30 +60,63 @@ impl Component for ContainerDetailPage {
                     set_vexpand: true,
 
                     adw::Clamp {
-                        set_margin_all: 12,
+                        set_margin_all: 18,
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 18,
 
-                            adw::PreferencesGroup {
-                                set_title: "Status",
+                            // Hero: name + status chip.
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 12,
 
-                                adw::ActionRow {
-                                    set_title: "State",
-                                    add_prefix = &gtk::Image {
-                                        #[watch]
-                                        set_icon_name: Some(model.state_icon()),
-                                        #[watch]
-                                        set_css_classes: &[model.state_css()],
-                                    },
-                                    #[watch]
-                                    set_subtitle: &model.container.status,
+                                gtk::Label {
+                                    set_label: &model.container.name,
+                                    add_css_class: "title-1",
+                                    set_hexpand: true,
+                                    set_halign: gtk::Align::Start,
+                                    set_xalign: 0.0,
+                                    set_ellipsize: gtk::pango::EllipsizeMode::End,
                                 },
-                                adw::ActionRow {
-                                    set_title: "Uptime",
+                                gtk::Label {
+                                    set_valign: gtk::Align::Center,
                                     #[watch]
-                                    set_subtitle: &model.uptime(),
+                                    set_label: model.chip_label(),
+                                    #[watch]
+                                    set_css_classes: &["status-chip", model.chip_variant()],
+                                },
+                            },
+
+                            // Stat tiles. Uptime now; CPU/memory join here in the
+                            // follow-up. Homogeneous so tiles share the width.
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 12,
+                                set_homogeneous: true,
+
+                                gtk::Box {
+                                    add_css_class: "card",
+
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 4,
+                                        set_margin_all: 14,
+
+                                        gtk::Label {
+                                            set_label: "UPTIME",
+                                            add_css_class: "caption",
+                                            add_css_class: "dim-label",
+                                            set_halign: gtk::Align::Start,
+                                        },
+                                        gtk::Label {
+                                            #[watch]
+                                            set_label: &model.uptime(),
+                                            add_css_class: "title-2",
+                                            add_css_class: "numeric",
+                                            set_halign: gtk::Align::Start,
+                                        },
+                                    },
                                 },
                             },
 
@@ -191,24 +224,30 @@ impl Component for ContainerDetailPage {
 }
 
 impl ContainerDetailPage {
-    fn state_icon(&self) -> &'static str {
+    /// The state name shown in the chip.
+    fn chip_label(&self) -> &'static str {
         match self.container.state {
-            ContainerState::Running => "media-playback-start-symbolic",
-            ContainerState::Paused => "media-playback-pause-symbolic",
-            ContainerState::Restarting | ContainerState::Stopping => "view-refresh-symbolic",
-            ContainerState::Dead => "dialog-error-symbolic",
-            _ => "media-playback-stop-symbolic",
+            ContainerState::Created => "Created",
+            ContainerState::Running => "Running",
+            ContainerState::Paused => "Paused",
+            ContainerState::Restarting => "Restarting",
+            ContainerState::Stopping => "Stopping",
+            ContainerState::Exited => "Exited",
+            ContainerState::Removing => "Removing",
+            ContainerState::Dead => "Dead",
+            ContainerState::Unknown => "Unknown",
         }
     }
 
-    fn state_css(&self) -> &'static str {
+    /// The chip's colour class (paired with `status-chip` in the CSS).
+    fn chip_variant(&self) -> &'static str {
         match self.container.state {
-            ContainerState::Running => "success",
+            ContainerState::Running => "running",
             ContainerState::Restarting | ContainerState::Stopping | ContainerState::Paused => {
                 "warning"
             }
             ContainerState::Dead => "error",
-            _ => "dim-label",
+            _ => "neutral",
         }
     }
 
