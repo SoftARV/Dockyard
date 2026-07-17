@@ -168,6 +168,9 @@ impl Container {
 pub struct ContainerDetail {
     /// Current state, so a periodic re-inspect can keep the chip/button live.
     pub state: ContainerState,
+    /// Published ports, so a re-inspect picks up bindings a container gains when
+    /// it starts (a stopped container has none).
+    pub ports: Vec<Port>,
     /// Start time as an RFC3339 string, for computing live uptime. `None` when
     /// the container isn't running (a stopped container has no meaningful
     /// uptime).
@@ -188,6 +191,8 @@ impl ContainerDetail {
             .map(ContainerState::from)
             .unwrap_or(ContainerState::Unknown);
 
+        let ports = ports_from_inspect(&resp);
+
         let started_at = running
             .then(|| state.and_then(|s| s.started_at.clone()))
             .flatten();
@@ -207,11 +212,59 @@ impl ContainerDetail {
 
         Self {
             state: container_state,
+            ports,
             started_at,
             created: resp.created,
             command,
         }
     }
+}
+
+/// Map inspect's `NetworkSettings.ports` to our published-port list.
+///
+/// The map is keyed `"5432/tcp"` -> host bindings. We keep only ports actually
+/// published to the host (a binding with a `host_port`), matching what the list
+/// summary shows and dropping merely-exposed ports.
+fn ports_from_inspect(resp: &ContainerInspectResponse) -> Vec<Port> {
+    let mut ports: Vec<Port> = resp
+        .network_settings
+        .as_ref()
+        .and_then(|net| net.ports.as_ref())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, bindings)| {
+                    let (private, protocol) = parse_port_key(key)?;
+                    // First binding that names a host port.
+                    let public = bindings
+                        .as_ref()?
+                        .iter()
+                        .find_map(|b| b.host_port.as_ref()?.parse::<u16>().ok())?;
+                    Some(Port {
+                        private,
+                        public,
+                        protocol,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // One mapping per interface (v4/v6) would otherwise duplicate.
+    ports.sort_unstable_by_key(|port| (port.public, port.private));
+    ports.dedup();
+    ports
+}
+
+/// `"5432/tcp"` -> `(5432, Tcp)`.
+fn parse_port_key(key: &str) -> Option<(u16, Protocol)> {
+    let (port, proto) = key.split_once('/')?;
+    let private = port.parse().ok()?;
+    let protocol = match proto {
+        "udp" => Protocol::Udp,
+        "sctp" => Protocol::Sctp,
+        _ => Protocol::Tcp,
+    };
+    Some((private, protocol))
 }
 
 /// One resource sample from the stats stream.
@@ -332,6 +385,46 @@ mod tests {
         // 1000 usage minus 200 reclaimable cache
         assert_eq!(stats.mem_used, 800);
         assert_eq!(stats.mem_limit, 4000);
+    }
+
+    #[test]
+    fn maps_published_ports_from_inspect() {
+        use bollard::models::{NetworkSettings, PortBinding};
+
+        let resp = ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                ports: Some(
+                    [
+                        // Published: two interface bindings dedupe to one.
+                        (
+                            "5432/tcp".to_owned(),
+                            Some(vec![
+                                PortBinding {
+                                    host_ip: Some("0.0.0.0".to_owned()),
+                                    host_port: Some("5432".to_owned()),
+                                },
+                                PortBinding {
+                                    host_ip: Some("::".to_owned()),
+                                    host_port: Some("5432".to_owned()),
+                                },
+                            ]),
+                        ),
+                        // Exposed but not published -> dropped.
+                        ("9000/tcp".to_owned(), None),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ports = ContainerDetail::from_inspect(resp).ports;
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].public, 5432);
+        assert_eq!(ports[0].private, 5432);
+        assert_eq!(ports[0].protocol, Protocol::Tcp);
     }
 
     #[test]

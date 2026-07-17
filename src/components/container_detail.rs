@@ -387,8 +387,10 @@ impl Component for ContainerDetailPage {
     ) {
         match msg {
             DetailCmd::Inspected(Ok(detail)) => {
-                // Keep the chip and start/stop button in sync with reality.
+                // Keep the chip, button, and ports in sync with reality — a
+                // container gains published ports when it starts.
                 self.container.state = detail.state;
+                self.container.ports = detail.ports.clone();
                 self.started_unix = detail.started_at.as_deref().and_then(parse_unix);
                 self.detail = Some(detail);
                 // If it just came up (via the button or elsewhere), (re)start
