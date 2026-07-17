@@ -242,7 +242,12 @@ distinct. Everything arriving in `update_cmd` came from a command.
   where the native feel comes from — accent colour, dark mode, and adaptive
   layout are then free.
 - No custom CSS unless there is no libadwaita widget for the job. If you think
-  you need custom CSS, say why first.
+  you need custom CSS, say why first. **One exception exists so far**: the
+  `.status-chip` pill in `main.rs` (`load_css`), because libadwaita has no
+  chip/badge widget — its `.badge` is the view-switcher bubble, and the colour
+  classes only tint text. It's tonal (a tint of the state colour behind matching
+  text) and uses Adwaita's own named colours, so it follows the theme. Add to
+  this stylesheet only when there's genuinely no widget for the job.
 
 ## Refresh strategy
 
