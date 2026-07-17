@@ -272,9 +272,9 @@ In scope for v1:
 - ✅ View logs (`docker.logs()` with `follow: true`, tail 200)
 
 **All three v1 features are built** (logs shipped in #10, with follow-scroll, a
-wrap toggle and a timestamp toggle). The `.desktop` file, icon and installer
-are done too. Remaining work is polish, not scope — notably an `adw::StatusPage`
-for the "no containers" empty state, which today renders as a blank group.
+wrap toggle and a timestamp toggle). The `.desktop` file, icon, installer, and
+the "no containers" empty-state `adw::StatusPage` are all done too. v1 is
+complete; remaining ideas are v2 (events instead of polling).
 
 **Explicitly out of scope** — do not build these, do not scaffold for them:
 image builds, `docker compose`, volumes, networks, registries, `exec` into a

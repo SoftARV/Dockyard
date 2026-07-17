@@ -288,14 +288,37 @@ impl Component for AppModel {
                                     set_description: Some(reason),
                                 },
 
-                                ViewState::Ready => gtk::ScrolledWindow {
-                                    set_vexpand: true,
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_margin_all: 12,
+                                // Connected. A Stack rather than an `if`, so the
+                                // factory's list widget isn't re-parented every
+                                // time the last container goes or the first
+                                // arrives — only the visible page flips.
+                                ViewState::Ready => gtk::Stack {
+                                    add_named[Some("list")] = &gtk::ScrolledWindow {
+                                        set_vexpand: true,
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_margin_all: 12,
 
-                                        #[local_ref]
-                                        container_group -> adw::PreferencesGroup {},
+                                            #[local_ref]
+                                            container_group -> adw::PreferencesGroup {},
+                                        },
+                                    },
+
+                                    add_named[Some("empty")] = &adw::StatusPage {
+                                        set_icon_name: Some("package-x-generic-symbolic"),
+                                        set_title: "No Containers",
+                                        set_description: Some(
+                                            "Containers on this machine will appear here.",
+                                        ),
+                                    },
+
+                                    // Set after the children exist — naming a
+                                    // missing child is a GTK-CRITICAL.
+                                    #[watch]
+                                    set_visible_child_name: if model.containers.is_empty() {
+                                        "empty"
+                                    } else {
+                                        "list"
                                     },
                                 },
                             },
