@@ -400,11 +400,40 @@ Exposed and fixed the two staleness bugs described above.
   exactly the two name tests and leaves the other eight green.
 - The poll stops while the window isn't visible, via
   `gtk::Window::is_suspended`. See "What the app actually costs" — this buys
-  wakeups, not CPU.
+  wakeups, not CPU. Both halves confirmed by hand: minimise stops the poll
+  (after GNOME's ~4s lag), restoring starts it again. The resume path needed a
+  human, since Wayland refuses a scripted `present()`.
 - Established that plain `cargo clippy` doesn't lint tests; the bar is now
   `--all-targets`.
 
 `cargo clippy --all-targets -- -D warnings` clean throughout.
+
+### Testing the parts the compiler can't reach
+
+The app narrates itself, so most behaviour can be checked by watching the log
+rather than squinting at pixels:
+
+```bash
+RUST_LOG=dockyard=debug cargo run 2>&1 | grep --line-buffered -E "poll|visibility|rebuilding"
+```
+
+- **Poll gating.** Minimise (`Super`+`H`) or switch workspace, wait ~5s for
+  GNOME's lag: `suspended=true` → `stopping poll`. Restore: `suspended=false` →
+  `starting poll`. Both halves must appear; if `starting poll` doesn't, the app
+  is silently frozen.
+- **Rows update in place.** `rebuilding rows` should appear exactly *once*, at
+  startup. If it fires on every poll, the reconcile has broken and open
+  popovers will slam shut.
+- **State changes reach the UI.** Change the world from another terminal —
+  `docker stop <name>` — and watch the row follow. Do it while minimised to
+  test that resuming refreshes immediately rather than waiting for a tick.
+- **Errors become toasts.** Two containers here bind host port 5432
+  (`inventory_pos_db` and `inventory_db`), so they can never run at once.
+  Starting the stopped one while the other is up is a free, reproducible daemon
+  error: it must surface as a toast, and the row must stop spinning.
+
+Only one copy runs at a time (D-Bus app ID), so `pkill -f target/debug/dockyard`
+before each run or the new one hands off to the old one and exits silently.
 
 ### What testing actually caught
 
@@ -436,12 +465,8 @@ for driving the UI, not just for green builds.
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
 - Nothing shows progress for `ShowLogs`, because logs don't exist yet.
-- The poll's *resume* path (window restored -> polling restarts) is unverified:
-  Wayland refuses a programmatic `present()`, so no script can restore a window
-  to test it. Suspend -> stop is verified. If the app ever looks frozen after
-  un-minimising, this is the first place to look.
 - GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
-  you minimise.
+  you minimise. Expected, not a bug — don't go looking for a faster signal.
 - `tokio` and `futures-util` are in `Cargo.toml` but unused by our code — relm4
   owns the tokio runtime. `futures-util` will be needed for the logs stream;
   `tokio` may never be.
