@@ -39,9 +39,9 @@ Native, Node) who is **new to Rust**. Consequences:
 Rust edition 2024. Plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `env-filter` — `main.rs` can't init tracing without it, and it gives `RUST_LOG`.
 
-`tokio` and `futures-util` are pinned above but **not currently used by our
-code**: relm4 owns the tokio runtime. `futures-util` earns its place with the
-logs stream; `tokio` may never.
+`futures-util` is used by the logs stream (`StreamExt`/`FutureExt` in
+`client.rs` and `logs_page.rs`). `tokio` is pinned but **not** used directly by
+our code — relm4 owns the tokio runtime — and may never be.
 
 Enable relm4's `libadwaita` **and `gnome_46`** features. Do **not** add `gtk4`
 or `libadwaita` as direct dependencies with independent versions — take them
@@ -161,7 +161,7 @@ src/
   components/
     mod.rs
     container_row.rs   # FactoryComponent -> adw::ActionRow
-    logs_page.rs       # streaming log view                        [not built]
+    logs_page.rs       # Component -> adw::NavigationPage, streaming log view
 data/
   dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
   icons/hicolor/{16x16,...,512x512,scalable}/apps/dev.miguelrincon.Dockyard.{png,svg}
@@ -269,10 +269,11 @@ In scope for v1:
 
 - ✅ List containers (name, image, status, ports), including stopped ones
 - ✅ Start / stop / restart / remove
-- ⬜ View logs (`docker.logs()` with `follow: true`, tail 200) — the last one
+- ✅ View logs (`docker.logs()` with `follow: true`, tail 200)
 
-Also still missing, small: an `adw::StatusPage` for "no containers" (today it's
-a blank group). The `.desktop` file, icon and installer are done.
+Still missing, small: an `adw::StatusPage` for "no containers" (today it's a
+blank group) — the last gap before v1 is complete. The `.desktop` file, icon
+and installer are done.
 
 **Explicitly out of scope** — do not build these, do not scaffold for them:
 image builds, `docker compose`, volumes, networks, registries, `exec` into a

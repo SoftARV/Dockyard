@@ -11,12 +11,16 @@ use bollard::Docker;
 use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
 use relm4::gtk::glib;
-use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
+use relm4::{
+    Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmWidgetExt,
+    adw, gtk,
+};
 use tracing::debug;
 
 use crate::components::container_row::{
     ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
 };
+use crate::components::logs_page::{LogsInit, LogsPage};
 use crate::docker::client;
 use crate::docker::types::Container;
 
@@ -47,6 +51,13 @@ pub struct AppModel {
     /// wakeups are what cost battery on a laptop. Doing that for a window
     /// nobody can see is just waste.
     poll: Option<glib::SourceId>,
+    /// The navigation stack: container list at the root, a logs page pushed on
+    /// top. Held so `update` can push/pop; a refcounted GTK handle.
+    nav: adw::NavigationView,
+    /// The logs page, while one is open. Holding the `Controller` *is* what
+    /// keeps its log stream alive — dropping it (on navigate-back) shuts the
+    /// component down, which cancels the stream via `drop_on_shutdown`.
+    logs: Option<Controller<LogsPage>>,
     /// Held so `update` can raise toasts. This is a refcounted GTK handle, not
     /// shared model state — cloning it is just a pointer bump, and it's the
     /// standard relm4 escape hatch for widgets that are commanded rather than
@@ -67,7 +78,11 @@ pub enum AppMsg {
     Remove(String),
     /// The user confirmed the dialog. This is the one that actually removes.
     RemoveConfirmed(String),
+    /// Open the logs page for a container.
     ShowLogs(String),
+    /// The logs page was popped (back button, Escape, swipe). Drops its
+    /// controller, which stops the stream.
+    LogsClosed,
     Error(String),
     /// The window became visible or stopped being visible. GTK reports this for
     /// minimised, fully obscured, *and* on-another-workspace — which is exactly
@@ -223,56 +238,66 @@ impl Component for AppModel {
 
             #[local_ref]
             toast_overlay -> adw::ToastOverlay {
-                adw::ToolbarView {
-                    add_top_bar = &adw::HeaderBar {
-                        pack_end = &gtk::Button {
-                            set_icon_name: "view-refresh-symbolic",
-                            set_tooltip_text: Some("Refresh"),
-                            #[watch]
-                            set_visible: !model.refreshing,
-                            #[watch]
-                            set_sensitive: model.docker.is_some(),
-                            connect_clicked => AppMsg::ManualRefresh,
-                        },
+                // The navigation stack. Root page = the container list; the logs
+                // page is pushed on top from `update` and pops back to here.
+                #[local_ref]
+                nav -> adw::NavigationView {
+                    adw::NavigationPage {
+                        set_title: "Dockyard",
 
-                        // Only ever shown for a refresh the user asked for. A
-                        // local list call takes ~2ms so this usually isn't seen
-                        // at all — it earns its place when the daemon is slow.
-                        pack_end = &gtk::Spinner {
-                            #[watch]
-                            set_visible: model.refreshing,
-                            #[watch]
-                            set_spinning: model.refreshing,
-                            set_valign: gtk::Align::Center,
-                        },
-                    },
+                        adw::ToolbarView {
+                            add_top_bar = &adw::HeaderBar {
+                                pack_end = &gtk::Button {
+                                    set_icon_name: "view-refresh-symbolic",
+                                    set_tooltip_text: Some("Refresh"),
+                                    #[watch]
+                                    set_visible: !model.refreshing,
+                                    #[watch]
+                                    set_sensitive: model.docker.is_some(),
+                                    connect_clicked => AppMsg::ManualRefresh,
+                                },
 
-                    #[wrap(Some)]
-                    set_content = match &model.state {
-                        ViewState::Loading => gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_valign: gtk::Align::Center,
-                            gtk::Spinner {
-                                set_spinning: true,
-                                set_size_request: (32, 32),
+                                // Only ever shown for a refresh the user asked
+                                // for. A local list call takes ~2ms so this
+                                // usually isn't seen — it earns its place when
+                                // the daemon is slow.
+                                pack_end = &gtk::Spinner {
+                                    #[watch]
+                                    set_visible: model.refreshing,
+                                    #[watch]
+                                    set_spinning: model.refreshing,
+                                    set_valign: gtk::Align::Center,
+                                },
                             },
-                        },
 
-                        ViewState::Disconnected(reason) => adw::StatusPage {
-                            set_icon_name: Some("network-offline-symbolic"),
-                            set_title: "Docker isn't reachable",
-                            #[watch]
-                            set_description: Some(reason),
-                        },
+                            #[wrap(Some)]
+                            set_content = match &model.state {
+                                ViewState::Loading => gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_valign: gtk::Align::Center,
+                                    gtk::Spinner {
+                                        set_spinning: true,
+                                        set_size_request: (32, 32),
+                                    },
+                                },
 
-                        ViewState::Ready => gtk::ScrolledWindow {
-                            set_vexpand: true,
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_margin_all: 12,
+                                ViewState::Disconnected(reason) => adw::StatusPage {
+                                    set_icon_name: Some("network-offline-symbolic"),
+                                    set_title: "Docker isn't reachable",
+                                    #[watch]
+                                    set_description: Some(reason),
+                                },
 
-                                #[local_ref]
-                                container_group -> adw::PreferencesGroup {},
+                                ViewState::Ready => gtk::ScrolledWindow {
+                                    set_vexpand: true,
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_margin_all: 12,
+
+                                        #[local_ref]
+                                        container_group -> adw::PreferencesGroup {},
+                                    },
+                                },
                             },
                         },
                     },
@@ -304,12 +329,22 @@ impl Component for AppModel {
             busy: HashSet::new(),
             refreshing: false,
             poll: None,
+            nav: adw::NavigationView::new(),
+            logs: None,
             toast_overlay: adw::ToastOverlay::new(),
         };
 
         let toast_overlay = model.toast_overlay.clone();
+        let nav = model.nav.clone();
         let container_group = model.containers.widget();
         let widgets = view_output!();
+
+        // A pop means the user left the logs page (the only thing we push), so
+        // let the reducer drop its controller and resume polling.
+        let popped = sender.input_sender().clone();
+        model.nav.connect_popped(move |_, _| {
+            popped.send(AppMsg::LogsClosed).ok();
+        });
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -374,10 +409,31 @@ impl Component for AppModel {
                 dialog.present(Some(root));
             }
 
-            // TODO: push a logs page onto the NavigationView.
             AppMsg::ShowLogs(id) => {
-                let short: String = id.chars().take(12).collect();
-                self.toast(&format!("Logs for {short} aren't built yet"));
+                let Some(docker) = self.docker.clone() else {
+                    return;
+                };
+                let title = self.name_of(&id);
+
+                // Build the page and push it. Storing the controller keeps its
+                // log stream alive; `.detach()` because the page reports nothing
+                // back — navigation is handled by the `popped` signal.
+                let controller = LogsPage::builder()
+                    .launch(LogsInit { docker, id, title })
+                    .detach();
+                self.nav.push(controller.widget());
+                self.logs = Some(controller);
+
+                // Nothing on the list page is visible now, so stop polling it.
+                self.stop_poll();
+            }
+
+            AppMsg::LogsClosed => {
+                // Drops the controller -> shuts the component down -> the log
+                // stream's `drop_on_shutdown` cancels it. Resume the list.
+                self.logs = None;
+                self.start_poll(&sender);
+                sender.input(AppMsg::Refresh);
             }
 
             AppMsg::SuspendedChanged(suspended) => {

@@ -10,9 +10,10 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
-    ListContainersOptionsBuilder, RemoveContainerOptions, RestartContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+    ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptions,
+    RestartContainerOptions, StartContainerOptions, StopContainerOptions,
 };
+use futures_util::{Stream, StreamExt};
 use tracing::{debug, info, warn};
 
 use super::types::Container;
@@ -182,6 +183,40 @@ pub async fn remove_container(docker: &Docker, id: &str) -> Result<()> {
         .remove_container(id, None::<RemoveContainerOptions>)
         .await
         .map_err(rejected)
+}
+
+/// Stream a container's logs: the last 200 lines, then live output as it
+/// arrives (`follow`).
+///
+/// The bollard `LogOutput`/`Error` types are mapped to our own `String`/`String`
+/// *here*, so the UI never touches a bollard type (rule 3). Each `Ok(String)`
+/// is a decoded chunk — Docker frames these however it likes, so a chunk isn't
+/// necessarily a whole line; the view just appends them in order.
+///
+/// The returned stream borrows `docker` and `id`, so the caller keeps both
+/// alive for as long as it polls — which is exactly what happens when the
+/// consuming `async` block owns them (see `components/logs_page.rs`). It can't
+/// return an owned `'static` stream without either a self-referential struct or
+/// an extra dependency, and borrowing costs neither.
+pub fn logs<'a>(
+    docker: &'a Docker,
+    id: &'a str,
+) -> impl Stream<Item = Result<String, String>> + Send + 'a {
+    // Always ask Docker to prepend its own RFC3339 timestamp. The view parses
+    // it off and shows it only when asked — so the timestamp toggle is pure
+    // presentation and never has to restart the stream.
+    let options = LogsOptionsBuilder::default()
+        .follow(true)
+        .stdout(true)
+        .stderr(true)
+        .timestamps(true)
+        .tail("200")
+        .build();
+
+    docker.logs(id, Some(options)).map(|item| {
+        item.map(|output| String::from_utf8_lossy(&output.into_bytes()).into_owned())
+            .map_err(|err| short_reason(&err))
+    })
 }
 
 /// Log the whole failure, hand back only the part worth showing.
