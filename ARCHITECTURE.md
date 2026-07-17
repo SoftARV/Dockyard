@@ -427,10 +427,28 @@ RUST_LOG=dockyard=debug cargo run 2>&1 | grep --line-buffered -E "poll|visibilit
 - **State changes reach the UI.** Change the world from another terminal —
   `docker stop <name>` — and watch the row follow. Do it while minimised to
   test that resuming refreshes immediately rather than waiting for a tick.
-- **Errors become toasts.** Two containers here bind host port 5432
-  (`inventory_pos_db` and `inventory_db`), so they can never run at once.
-  Starting the stopped one while the other is up is a free, reproducible daemon
-  error: it must surface as a toast, and the row must stop spinning.
+- **Errors become toasts.** Use a throwaway container and try to remove it while
+  it's running. `remove_container` is deliberately unforced, so Docker refuses:
+
+  ```bash
+  docker run -d --name dockyard-test alpine sleep 3600
+  # in the app: ⋯ -> Remove -> confirm
+  docker rm -f dockyard-test        # cleanup
+  ```
+
+  Expect a toast carrying Docker's refusal, the row's spinner stopping, and the
+  container still running afterwards. Non-destructive and repeatable — the
+  failed remove leaves the container alone, which is the whole point of not
+  forcing it. Worth checking the toast is actually *readable*: bollard's errors
+  are verbose and an `adw::Toast` is one truncating line.
+
+  **Don't use a port conflict as the fixture.** It looks perfect — two
+  containers bound to the same host port can never run at once — and it is a
+  trap. A start that fails on port allocation can leave the container detached
+  from its network (`NetworkMode` set, `NetworkSettings.Networks` empty). From
+  then on it starts *successfully* with no network, no published port and no
+  error, because with no network there's nothing to publish a port on. The
+  fixture silently stops being a fixture, and you're left testing nothing.
 
 Only one copy runs at a time (D-Bus app ID), so `pkill -f target/debug/dockyard`
 before each run or the new one hands off to the old one and exits silently.
@@ -464,6 +482,13 @@ for driving the UI, not just for green builds.
 
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
+- **"Running" doesn't mean "working", and we can't tell.** A start that fails on
+  port allocation can leave a container detached from its network; it then
+  starts fine with only loopback, reachable by nothing. We draw it as an
+  ordinary "Up 3 minutes" row with no ports — accurate, because that is exactly
+  what Docker reports, and still misleading. The absent port is the only tell.
+  Surfacing it properly would mean inspecting networks, which CLAUDE.md puts
+  out of scope, so this stays a known blind spot rather than a TODO.
 - Nothing shows progress for `ShowLogs`, because logs don't exist yet.
 - GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
   you minimise. Expected, not a bug — don't go looking for a faster signal.
