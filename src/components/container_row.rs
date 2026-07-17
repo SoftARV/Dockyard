@@ -4,7 +4,8 @@ use relm4::adw::prelude::*;
 use relm4::factory::{DynamicIndex, FactoryComponent, FactorySender};
 use relm4::{adw, gtk};
 
-use crate::docker::types::{Container, ContainerState};
+use crate::components::status_chip;
+use crate::docker::types::Container;
 
 /// What a row asks the parent to do. Rows never touch Docker themselves — they
 /// emit an intent and `AppModel::update` owns the decision, which keeps all
@@ -106,28 +107,6 @@ impl ContainerRow {
 
         parts.join(" · ")
     }
-
-    /// libadwaita ships semantic colours for exactly this; no custom CSS needed.
-    fn status_icon(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Running => "media-playback-start-symbolic",
-            ContainerState::Paused => "media-playback-pause-symbolic",
-            ContainerState::Restarting | ContainerState::Stopping => "view-refresh-symbolic",
-            ContainerState::Dead => "dialog-error-symbolic",
-            _ => "media-playback-stop-symbolic",
-        }
-    }
-
-    fn status_css(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Running => "success",
-            ContainerState::Restarting | ContainerState::Stopping | ContainerState::Paused => {
-                "warning"
-            }
-            ContainerState::Dead => "error",
-            _ => "dim-label",
-        }
-    }
 }
 
 #[relm4::factory(pub)]
@@ -152,15 +131,15 @@ impl FactoryComponent for ContainerRow {
                 sender.output(ContainerRowOutput::ShowDetails(id.clone())).ok();
             },
 
-            add_prefix = &gtk::Image {
+            // The status chip (same one the detail page uses) replaces the old
+            // coloured status icon. `set_css_classes` replaces the whole list,
+            // so the previous variant doesn't accumulate across state changes.
+            add_prefix = &gtk::Label {
+                set_valign: gtk::Align::Center,
                 #[watch]
-                set_icon_name: Some(self.status_icon()),
-                // `set_css_classes` replaces the list; `add_css_class` appends.
-                // Under #[watch] the appending form would accumulate, so a
-                // container that ran and then exited would end up styled both
-                // "success" and "dim-label" at once.
+                set_label: status_chip::label(self.container.state),
                 #[watch]
-                set_css_classes: &[self.status_css()],
+                set_css_classes: &["status-chip", status_chip::variant(self.container.state)],
             },
 
             // The button and its spinner share one Stack, so the row keeps a

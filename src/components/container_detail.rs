@@ -12,8 +12,9 @@ use relm4::adw::prelude::*;
 use relm4::gtk::glib;
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
 
+use crate::components::status_chip;
 use crate::docker::client;
-use crate::docker::types::{Container, ContainerDetail, ContainerState};
+use crate::docker::types::{Container, ContainerDetail};
 
 pub struct ContainerDetailInit {
     pub docker: Docker,
@@ -82,9 +83,12 @@ impl Component for ContainerDetailPage {
                                 gtk::Label {
                                     set_valign: gtk::Align::Center,
                                     #[watch]
-                                    set_label: model.chip_label(),
+                                    set_label: status_chip::label(model.container.state),
                                     #[watch]
-                                    set_css_classes: &["status-chip", model.chip_variant()],
+                                    set_css_classes: &[
+                                        "status-chip",
+                                        status_chip::variant(model.container.state),
+                                    ],
                                 },
                             },
 
@@ -224,33 +228,6 @@ impl Component for ContainerDetailPage {
 }
 
 impl ContainerDetailPage {
-    /// The state name shown in the chip.
-    fn chip_label(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Created => "Created",
-            ContainerState::Running => "Running",
-            ContainerState::Paused => "Paused",
-            ContainerState::Restarting => "Restarting",
-            ContainerState::Stopping => "Stopping",
-            ContainerState::Exited => "Exited",
-            ContainerState::Removing => "Removing",
-            ContainerState::Dead => "Dead",
-            ContainerState::Unknown => "Unknown",
-        }
-    }
-
-    /// The chip's colour class (paired with `status-chip` in the CSS).
-    fn chip_variant(&self) -> &'static str {
-        match self.container.state {
-            ContainerState::Running => "running",
-            ContainerState::Restarting | ContainerState::Stopping | ContainerState::Paused => {
-                "warning"
-            }
-            ContainerState::Dead => "error",
-            _ => "neutral",
-        }
-    }
-
     /// Live uptime, recomputed each tick. "—" until we know the start time, and
     /// for containers that aren't running.
     fn uptime(&self) -> String {
