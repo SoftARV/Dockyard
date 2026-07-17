@@ -35,14 +35,20 @@ fn main() {
 const CSS: &str = "
 .status-chip {
     border-radius: 9999px;
-    padding: 2px 10px;
+    padding: 3px 12px;
     font-weight: bold;
     font-size: 0.8em;
 }
-.status-chip.running { background-color: @success_bg_color; color: @success_fg_color; }
-.status-chip.warning { background-color: @warning_bg_color; color: @warning_fg_color; }
-.status-chip.error   { background-color: @error_bg_color;   color: @error_fg_color; }
-.status-chip.neutral { background-color: alpha(@window_fg_color, 0.12); color: @window_fg_color; }
+/* Tonal: a soft tint of the state colour behind the same colour as text, so the
+   text matches the chip. `@success_color` etc. are Adwaita's standalone
+   semantic colours, tuned to read on the window background. */
+.status-chip.running { background-color: alpha(@success_color, 0.15); color: @success_color; }
+.status-chip.warning { background-color: alpha(@warning_color, 0.15); color: @warning_color; }
+.status-chip.error   { background-color: alpha(@error_color, 0.15);   color: @error_color; }
+.status-chip.neutral {
+    background-color: alpha(@window_fg_color, 0.08);
+    color: alpha(@window_fg_color, 0.7);
+}
 ";
 
 fn load_css() {
