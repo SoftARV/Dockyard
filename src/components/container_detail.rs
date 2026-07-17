@@ -21,6 +21,11 @@ use crate::docker::types::{Container, ContainerDetail, Stats};
 /// How many recent samples each graph keeps.
 const HISTORY: usize = 60;
 
+/// Graph line colours (Adwaita blue-3 / purple-3). Fixed rather than
+/// theme-derived, so CPU and memory stay visually distinct.
+const CPU_COLOR: gtk::gdk::RGBA = gtk::gdk::RGBA::new(0.384, 0.627, 0.918, 1.0); // #62a0ea
+const MEM_COLOR: gtk::gdk::RGBA = gtk::gdk::RGBA::new(0.753, 0.380, 0.796, 1.0); // #c061cb
+
 pub struct ContainerDetailInit {
     pub docker: Docker,
     /// What the list already knows — shown at once, before `inspect` returns.
@@ -452,7 +457,6 @@ impl ContainerDetailPage {
     fn redraw(&mut self) {
         // CPU can exceed 100% on multiple cores, so scale to the peak seen.
         let cpu_max = self.cpu_history.iter().copied().fold(100.0_f64, f64::max);
-        let cpu_color = self.cpu_draw.drawing_area().color();
         let (cw, ch) = (self.cpu_draw.width(), self.cpu_draw.height());
         draw_graph(
             &self.cpu_draw.get_context(),
@@ -460,10 +464,9 @@ impl ContainerDetailPage {
             ch,
             &self.cpu_history,
             cpu_max,
-            cpu_color,
+            CPU_COLOR,
         );
 
-        let mem_color = self.mem_draw.drawing_area().color();
         let (mw, mh) = (self.mem_draw.width(), self.mem_draw.height());
         draw_graph(
             &self.mem_draw.get_context(),
@@ -471,7 +474,7 @@ impl ContainerDetailPage {
             mh,
             &self.mem_history,
             100.0,
-            mem_color,
+            MEM_COLOR,
         );
     }
 }
