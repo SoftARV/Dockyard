@@ -271,9 +271,10 @@ In scope for v1:
 - ✅ Start / stop / restart / remove
 - ✅ View logs (`docker.logs()` with `follow: true`, tail 200)
 
-Still missing, small: an `adw::StatusPage` for "no containers" (today it's a
-blank group) — the last gap before v1 is complete. The `.desktop` file, icon
-and installer are done.
+**All three v1 features are built** (logs shipped in #10, with follow-scroll, a
+wrap toggle and a timestamp toggle). The `.desktop` file, icon and installer
+are done too. Remaining work is polish, not scope — notably an `adw::StatusPage`
+for the "no containers" empty state, which today renders as a blank group.
 
 **Explicitly out of scope** — do not build these, do not scaffold for them:
 image builds, `docker compose`, volumes, networks, registries, `exec` into a
