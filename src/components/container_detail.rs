@@ -1,22 +1,33 @@
 //! The container detail view — a page pushed onto the `NavigationView` when a
 //! row is clicked. Dashboard cards for status, uptime, CPU and memory, plus
-//! details and ports.
+//! details, ports, and an embedded live log panel.
 //!
 //! Three things load on open: the `Container` from the list shows at once; a
 //! one-shot `inspect` (re-run every 2s) fills in state, start time, command; and
 //! a `stats` stream feeds the CPU/memory graphs while the container runs. A 1s
 //! timer ticks the uptime.
+//!
+//! The layout is responsive via an `adw::BreakpointBin`. Below 720px the four
+//! stat cards stack 2×2 and the info/log panels stack vertically; at or above
+//! 720px the cards form one row of four and info sits left of the logs.
 
 use bollard::Docker;
 use futures_util::{FutureExt, StreamExt};
 use relm4::abstractions::DrawHandler;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
-use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
+use relm4::{
+    Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmWidgetExt,
+    adw, gtk,
+};
 
+use crate::components::logs_view::{LogsInit, LogsView};
 use crate::components::status_chip;
 use crate::docker::client;
 use crate::docker::types::{Container, ContainerDetail, Stats};
+
+/// Window width at which the layout switches from stacked to side-by-side.
+const WIDE_BREAKPOINT: &str = "min-width: 720px";
 
 /// How many recent samples each graph keeps.
 const HISTORY: usize = 60;
@@ -54,6 +65,10 @@ pub struct ContainerDetailPage {
     /// repaint from `*_history` on each sample — no `Rc<RefCell>` needed.
     cpu_draw: DrawHandler,
     mem_draw: DrawHandler,
+    /// The embedded log panel. Holding its `Controller` is what keeps the log
+    /// stream alive; when this page's controller is dropped (navigate-back), so
+    /// is this, which shuts the stream down via `drop_on_shutdown`.
+    logs: Controller<LogsView>,
 }
 
 #[derive(Debug)]
@@ -121,183 +136,215 @@ impl Component for ContainerDetailPage {
                 },
 
                 #[wrap(Some)]
-                set_content = &gtk::ScrolledWindow {
-                    set_vexpand: true,
+                #[name = "breakpoint_bin"]
+                set_content = &adw::BreakpointBin {
+                    // The BreakpointBin measures its own (window) width, so it
+                    // needs a minimum. Below this the window can't shrink further.
+                    set_size_request: (300, 200),
 
-                    adw::Clamp {
-                        set_margin_all: 18,
+                    #[wrap(Some)]
+                    set_child = &gtk::ScrolledWindow {
+                        set_vexpand: true,
 
-                        gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 18,
+                        adw::Clamp {
+                            // Wide enough that side-by-side has room at ≥720px,
+                            // capped so it doesn't sprawl on an ultrawide monitor.
+                            set_maximum_size: 1400,
+                            set_tightening_threshold: 800,
+                            set_margin_all: 18,
 
-                            // Stat tiles: status and uptime, side by side.
-                            // CPU/memory join this row in the follow-up.
-                            // Homogeneous so the tiles share the width.
                             gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 12,
-                                set_homogeneous: true,
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 18,
 
-                                // Status tile — the chip on its own card.
-                                gtk::Box {
-                                    add_css_class: "card",
+                                // The four stat cards. A FlowBox reflows them:
+                                // 2 per line narrow (2×2), bumped to 4 (one row)
+                                // by the breakpoint below. Homogeneous so they
+                                // share the width equally.
+                                #[name = "cards"]
+                                gtk::FlowBox {
+                                    set_orientation: gtk::Orientation::Horizontal,
+                                    set_selection_mode: gtk::SelectionMode::None,
+                                    set_homogeneous: true,
+                                    set_column_spacing: 12,
+                                    set_row_spacing: 12,
+                                    set_min_children_per_line: 2,
+                                    set_max_children_per_line: 2,
 
+                                    // Status card — the chip on its own card.
                                     gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 6,
-                                        set_margin_all: 14,
-
-                                        gtk::Label {
-                                            set_label: "STATUS",
-                                            add_css_class: "caption",
-                                            add_css_class: "dim-label",
-                                            set_halign: gtk::Align::Start,
-                                        },
-                                        gtk::Label {
-                                            set_halign: gtk::Align::Start,
-                                            #[watch]
-                                            set_label: status_chip::label(model.container.state),
-                                            #[watch]
-                                            set_css_classes: &[
-                                                "status-chip",
-                                                status_chip::variant(model.container.state),
-                                            ],
-                                        },
-                                    },
-                                },
-
-                                // Uptime tile.
-                                gtk::Box {
-                                    add_css_class: "card",
-
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 6,
-                                        set_margin_all: 14,
-
-                                        gtk::Label {
-                                            set_label: "UPTIME",
-                                            add_css_class: "caption",
-                                            add_css_class: "dim-label",
-                                            set_halign: gtk::Align::Start,
-                                        },
-                                        gtk::Label {
-                                            #[watch]
-                                            set_label: &model.uptime(),
-                                            add_css_class: "title-2",
-                                            add_css_class: "numeric",
-                                            set_halign: gtk::Align::Start,
-                                        },
-                                    },
-                                },
-                            },
-
-                            // Resource graphs: CPU and memory, side by side.
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 12,
-                                set_homogeneous: true,
-
-                                gtk::Box {
-                                    add_css_class: "card",
-
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 8,
-                                        set_margin_all: 14,
+                                        add_css_class: "card",
 
                                         gtk::Box {
-                                            set_orientation: gtk::Orientation::Horizontal,
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_spacing: 6,
+                                            set_margin_all: 14,
+
                                             gtk::Label {
-                                                set_label: "CPU",
+                                                set_label: "STATUS",
                                                 add_css_class: "caption",
                                                 add_css_class: "dim-label",
-                                                set_hexpand: true,
+                                                set_halign: gtk::Align::Start,
+                                            },
+                                            gtk::Label {
+                                                set_halign: gtk::Align::Start,
+                                                #[watch]
+                                                set_label: status_chip::label(model.container.state),
+                                                #[watch]
+                                                set_css_classes: &[
+                                                    "status-chip",
+                                                    status_chip::variant(model.container.state),
+                                                ],
+                                            },
+                                        },
+                                    },
+
+                                    // Uptime card.
+                                    gtk::Box {
+                                        add_css_class: "card",
+
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_spacing: 6,
+                                            set_margin_all: 14,
+
+                                            gtk::Label {
+                                                set_label: "UPTIME",
+                                                add_css_class: "caption",
+                                                add_css_class: "dim-label",
                                                 set_halign: gtk::Align::Start,
                                             },
                                             gtk::Label {
                                                 #[watch]
-                                                set_label: &model.cpu_value(),
-                                                add_css_class: "caption-heading",
+                                                set_label: &model.uptime(),
+                                                add_css_class: "title-2",
                                                 add_css_class: "numeric",
-                                                set_halign: gtk::Align::End,
+                                                set_halign: gtk::Align::Start,
                                             },
                                         },
-                                        #[local_ref]
-                                        cpu_area -> gtk::DrawingArea {
-                                            set_content_height: 44,
-                                            set_hexpand: true,
+                                    },
+
+                                    // CPU card.
+                                    gtk::Box {
+                                        add_css_class: "card",
+
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_spacing: 8,
+                                            set_margin_all: 14,
+
+                                            gtk::Box {
+                                                set_orientation: gtk::Orientation::Horizontal,
+                                                gtk::Label {
+                                                    set_label: "CPU",
+                                                    add_css_class: "caption",
+                                                    add_css_class: "dim-label",
+                                                    set_hexpand: true,
+                                                    set_halign: gtk::Align::Start,
+                                                },
+                                                gtk::Label {
+                                                    #[watch]
+                                                    set_label: &model.cpu_value(),
+                                                    add_css_class: "caption-heading",
+                                                    add_css_class: "numeric",
+                                                    set_halign: gtk::Align::End,
+                                                },
+                                            },
+                                            #[local_ref]
+                                            cpu_area -> gtk::DrawingArea {
+                                                set_content_height: 44,
+                                                set_hexpand: true,
+                                            },
+                                        },
+                                    },
+
+                                    // Memory card.
+                                    gtk::Box {
+                                        add_css_class: "card",
+
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Vertical,
+                                            set_spacing: 8,
+                                            set_margin_all: 14,
+
+                                            gtk::Box {
+                                                set_orientation: gtk::Orientation::Horizontal,
+                                                gtk::Label {
+                                                    set_label: "MEMORY",
+                                                    add_css_class: "caption",
+                                                    add_css_class: "dim-label",
+                                                    set_hexpand: true,
+                                                    set_halign: gtk::Align::Start,
+                                                },
+                                                gtk::Label {
+                                                    #[watch]
+                                                    set_label: &model.mem_value(),
+                                                    add_css_class: "caption-heading",
+                                                    add_css_class: "numeric",
+                                                    set_halign: gtk::Align::End,
+                                                },
+                                            },
+                                            #[local_ref]
+                                            mem_area -> gtk::DrawingArea {
+                                                set_content_height: 44,
+                                                set_hexpand: true,
+                                            },
                                         },
                                     },
                                 },
 
+                                // Info (details + ports) beside the logs. Starts
+                                // stacked (vertical); the breakpoint flips it to
+                                // horizontal so info sits left of the logs.
+                                #[name = "body"]
                                 gtk::Box {
-                                    add_css_class: "card",
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 18,
+                                    set_vexpand: true,
 
                                     gtk::Box {
                                         set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 8,
-                                        set_margin_all: 14,
+                                        set_spacing: 18,
+                                        set_hexpand: true,
 
-                                        gtk::Box {
-                                            set_orientation: gtk::Orientation::Horizontal,
-                                            gtk::Label {
-                                                set_label: "MEMORY",
-                                                add_css_class: "caption",
-                                                add_css_class: "dim-label",
-                                                set_hexpand: true,
-                                                set_halign: gtk::Align::Start,
+                                        adw::PreferencesGroup {
+                                            set_title: "Details",
+
+                                            adw::ActionRow {
+                                                set_title: "Image",
+                                                set_subtitle: &model.container.image,
+                                                set_subtitle_selectable: true,
                                             },
-                                            gtk::Label {
+                                            adw::ActionRow {
+                                                set_title: "ID",
+                                                set_subtitle: &model.container.id,
+                                                set_subtitle_selectable: true,
+                                            },
+                                            adw::ActionRow {
+                                                set_title: "Command",
                                                 #[watch]
-                                                set_label: &model.mem_value(),
-                                                add_css_class: "caption-heading",
-                                                add_css_class: "numeric",
-                                                set_halign: gtk::Align::End,
+                                                set_subtitle: &model.command(),
+                                                set_subtitle_selectable: true,
+                                            },
+                                            adw::ActionRow {
+                                                set_title: "Created",
+                                                #[watch]
+                                                set_subtitle: &model.created(),
                                             },
                                         },
-                                        #[local_ref]
-                                        mem_area -> gtk::DrawingArea {
-                                            set_content_height: 44,
-                                            set_hexpand: true,
+
+                                        adw::PreferencesGroup {
+                                            set_title: "Ports",
+
+                                            adw::ActionRow {
+                                                #[watch]
+                                                set_title: &model.ports(),
+                                            },
                                         },
                                     },
-                                },
-                            },
 
-                            adw::PreferencesGroup {
-                                set_title: "Details",
-
-                                adw::ActionRow {
-                                    set_title: "Image",
-                                    set_subtitle: &model.container.image,
-                                    set_subtitle_selectable: true,
-                                },
-                                adw::ActionRow {
-                                    set_title: "ID",
-                                    set_subtitle: &model.container.id,
-                                    set_subtitle_selectable: true,
-                                },
-                                adw::ActionRow {
-                                    set_title: "Command",
-                                    #[watch]
-                                    set_subtitle: &model.command(),
-                                    set_subtitle_selectable: true,
-                                },
-                                adw::ActionRow {
-                                    set_title: "Created",
-                                    #[watch]
-                                    set_subtitle: &model.created(),
-                                },
-                            },
-
-                            adw::PreferencesGroup {
-                                set_title: "Ports",
-
-                                adw::ActionRow {
-                                    #[watch]
-                                    set_title: &model.ports(),
+                                    // The embedded log panel's root widget.
+                                    append: model.logs.widget(),
                                 },
                             },
                         },
@@ -312,6 +359,15 @@ impl Component for ContainerDetailPage {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        // The log panel streams on its own; holding the controller keeps that
+        // stream alive. `.detach()` because it reports nothing back.
+        let logs = LogsView::builder()
+            .launch(LogsInit {
+                docker: init.docker.clone(),
+                id: init.container.id.clone(),
+            })
+            .detach();
+
         let mut model = ContainerDetailPage {
             docker: init.docker,
             container: init.container,
@@ -323,10 +379,41 @@ impl Component for ContainerDetailPage {
             stats_active: false,
             cpu_draw: DrawHandler::new(),
             mem_draw: DrawHandler::new(),
+            logs,
         };
         let cpu_area = model.cpu_draw.drawing_area();
         let mem_area = model.mem_draw.drawing_area();
         let widgets = view_output!();
+
+        // Let the log panel share horizontal space when it sits beside the info
+        // column; harmless (just fills width) while stacked.
+        model.logs.widget().set_hexpand(true);
+
+        // Responsive layout. At ≥720px: the four cards form one row (4 per line)
+        // and the info/logs body switches from stacked to side-by-side. A
+        // `Breakpoint` records the original values and restores them below the
+        // threshold, so there's nothing to undo by hand. Parse can't really fail
+        // on a constant, but rule 5 forbids `unwrap`: on the impossible error we
+        // just skip the setters and keep the stacked layout.
+        if let Ok(condition) = adw::BreakpointCondition::parse(WIDE_BREAKPOINT) {
+            let breakpoint = adw::Breakpoint::new(condition);
+            breakpoint.add_setter(
+                &widgets.cards,
+                "min-children-per-line",
+                Some(&4u32.to_value()),
+            );
+            breakpoint.add_setter(
+                &widgets.cards,
+                "max-children-per-line",
+                Some(&4u32.to_value()),
+            );
+            breakpoint.add_setter(
+                &widgets.body,
+                "orientation",
+                Some(&gtk::Orientation::Horizontal.to_value()),
+            );
+            widgets.breakpoint_bin.add_breakpoint(breakpoint);
+        }
 
         // Inspect once now, and re-inspect every 2s so the chip/button/uptime
         // follow the container (the button's effect, or an external change).

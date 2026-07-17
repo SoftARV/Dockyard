@@ -227,7 +227,7 @@ pub fn stats<'a>(
 ///
 /// The returned stream borrows `docker` and `id`, so the caller keeps both
 /// alive for as long as it polls — which is exactly what happens when the
-/// consuming `async` block owns them (see `components/logs_page.rs`). It can't
+/// consuming `async` block owns them (see `components/logs_view.rs`). It can't
 /// return an owned `'static` stream without either a self-referential struct or
 /// an extra dependency, and borrowing costs neither.
 pub fn logs<'a>(

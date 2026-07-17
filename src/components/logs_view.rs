@@ -1,18 +1,19 @@
-//! The streaming log view — a detail page pushed onto the `NavigationView`.
+//! The streaming log view — an embeddable panel (a `Box`), placed inside the
+//! container detail page.
 //!
-//! This is the first component that streams. Everything else uses
-//! `oneshot_command` (fire an async call, get one result back). Logs need
-//! `command`, which hands the closure a `Sender` to push *many* messages over
-//! time and a `ShutdownReceiver` to stop. `drop_on_shutdown()` ties the stream's
-//! life to the component's: when the parent drops this page's `Controller`
-//! (on navigate-back), the future is dropped and the follow stops. No manual
+//! This is the component that streams. Everything else uses `oneshot_command`
+//! (fire an async call, get one result back). Logs need `command`, which hands
+//! the closure a `Sender` to push *many* messages over time and a
+//! `ShutdownReceiver` to stop. `drop_on_shutdown()` ties the stream's life to
+//! the component's: when the detail page drops this view's `Controller` (on
+//! navigate-back), the future is dropped and the follow stops. No manual
 //! cancellation token, no leaked stream running behind a page you've left.
 
 use bollard::Docker;
 use futures_util::{FutureExt, StreamExt};
 use relm4::adw::prelude::*;
 use relm4::gtk::gdk;
-use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
+use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, gtk};
 
 use crate::docker::client;
 
@@ -32,12 +33,9 @@ const TIMESTAMP_DIM: f32 = 0.55;
 pub struct LogsInit {
     pub docker: Docker,
     pub id: String,
-    /// The container name, shown as the page title.
-    pub title: String,
 }
 
-pub struct LogsPage {
-    title: String,
+pub struct LogsView {
     /// Long lines wrap. Toggled from the header, drives wrap mode via `#[watch]`.
     wrap: bool,
     /// Pinned to the bottom (following). False while the user reads scrollback,
@@ -76,74 +74,86 @@ pub enum LogsCmd {
 }
 
 #[relm4::component(pub)]
-impl Component for LogsPage {
+impl Component for LogsView {
     type Init = LogsInit;
     type Input = LogsInput;
     type Output = ();
     type CommandOutput = LogsCmd;
 
     view! {
-        adw::NavigationPage {
-            set_title: &model.title,
+        gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 6,
 
-            adw::ToolbarView {
-                add_top_bar = &adw::HeaderBar {
-                    // NavigationView adds the back button on the start side.
-                    // One menu button instead of a row of cryptic icon toggles.
-                    // The popover spells the options out, with a checkbox each.
-                    pack_end = &gtk::MenuButton {
-                        set_icon_name: "view-more-symbolic",
-                        set_tooltip_text: Some("View options"),
+            // Compact header: a heading and the options menu.
+            gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_margin_start: 2,
+                set_margin_end: 2,
 
-                        #[wrap(Some)]
-                        set_popover = &gtk::Popover {
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_spacing: 6,
-                                set_margin_all: 6,
+                gtk::Label {
+                    set_label: "Logs",
+                    add_css_class: "heading",
+                    set_hexpand: true,
+                    set_halign: gtk::Align::Start,
+                },
 
-                                gtk::CheckButton {
-                                    set_label: Some("Wrap long lines"),
-                                    set_active: true,
-                                    connect_toggled[sender] => move |check| {
-                                        sender.input(LogsInput::SetWrap(check.is_active()));
-                                    },
+                // One menu button rather than cryptic icon toggles; the popover
+                // spells out each option with a checkbox.
+                gtk::MenuButton {
+                    set_icon_name: "view-more-symbolic",
+                    set_tooltip_text: Some("View options"),
+                    add_css_class: "flat",
+
+                    #[wrap(Some)]
+                    set_popover = &gtk::Popover {
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 6,
+                            set_margin_all: 6,
+
+                            gtk::CheckButton {
+                                set_label: Some("Wrap long lines"),
+                                set_active: true,
+                                connect_toggled[sender] => move |check| {
+                                    sender.input(LogsInput::SetWrap(check.is_active()));
                                 },
+                            },
 
-                                gtk::CheckButton {
-                                    set_label: Some("Show timestamps"),
-                                    set_active: false,
-                                    connect_toggled[sender] => move |check| {
-                                        sender.input(LogsInput::SetTimestamps(check.is_active()));
-                                    },
+                            gtk::CheckButton {
+                                set_label: Some("Show timestamps"),
+                                set_active: false,
+                                connect_toggled[sender] => move |check| {
+                                    sender.input(LogsInput::SetTimestamps(check.is_active()));
                                 },
                             },
                         },
                     },
                 },
+            },
 
-                #[wrap(Some)]
-                set_content = &gtk::ScrolledWindow {
-                    set_vexpand: true,
+            gtk::ScrolledWindow {
+                set_vexpand: true,
+                set_min_content_height: 240,
+                add_css_class: "card",
 
-                    #[local_ref]
-                    view -> gtk::TextView {
-                        set_editable: false,
-                        set_cursor_visible: false,
-                        set_monospace: true,
-                        set_left_margin: 8,
-                        set_right_margin: 8,
-                        set_top_margin: 8,
-                        set_bottom_margin: 8,
-                        set_pixels_below_lines: ENTRY_SPACING,
-                        // WordChar wraps mid-word if a token is longer than the
-                        // pane (a 285-char log line has no spaces to break on).
-                        #[watch]
-                        set_wrap_mode: if model.wrap {
-                            gtk::WrapMode::WordChar
-                        } else {
-                            gtk::WrapMode::None
-                        },
+                #[local_ref]
+                view -> gtk::TextView {
+                    set_editable: false,
+                    set_cursor_visible: false,
+                    set_monospace: true,
+                    set_left_margin: 8,
+                    set_right_margin: 8,
+                    set_top_margin: 8,
+                    set_bottom_margin: 8,
+                    set_pixels_below_lines: ENTRY_SPACING,
+                    // WordChar wraps mid-word if a token is longer than the pane
+                    // (a 285-char log line has no spaces to break on).
+                    #[watch]
+                    set_wrap_mode: if model.wrap {
+                        gtk::WrapMode::WordChar
+                    } else {
+                        gtk::WrapMode::None
                     },
                 },
             },
@@ -166,8 +176,7 @@ impl Component for LogsPage {
 
         // Dim the timestamp relative to the *theme's* text colour, so it reads
         // right in both light and dark. `WidgetExt::color` only resolves once the
-        // view is realized, so apply then; the page is rebuilt on every open, so
-        // this also re-runs whenever the theme has since changed.
+        // view is realized, so apply then.
         let tag = ts_tag.clone();
         view.connect_realize(move |view| {
             let fg = view.color();
@@ -175,8 +184,7 @@ impl Component for LogsPage {
             tag.set_foreground_rgba(Some(&dim));
         });
 
-        let mut model = LogsPage {
-            title: init.title,
+        let mut model = LogsView {
             wrap: true,
             follow: true,
             view: view.clone(),
@@ -306,7 +314,7 @@ fn hms(stamp: &str) -> Option<String> {
     }
 }
 
-impl LogsPage {
+impl LogsView {
     /// Break a chunk into whole lines, buffering any trailing partial one.
     fn feed(&mut self, chunk: &str) {
         self.pending.push_str(chunk);

@@ -21,7 +21,6 @@ use crate::components::container_detail::{ContainerDetailInit, ContainerDetailPa
 use crate::components::container_row::{
     ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
 };
-use crate::components::logs_page::{LogsInit, LogsPage};
 use crate::docker::client;
 use crate::docker::types::Container;
 
@@ -52,14 +51,12 @@ pub struct AppModel {
     /// wakeups are what cost battery on a laptop. Doing that for a window
     /// nobody can see is just waste.
     poll: Option<glib::SourceId>,
-    /// The navigation stack: container list at the root, a logs page pushed on
+    /// The navigation stack: container list at the root, a detail page pushed on
     /// top. Held so `update` can push/pop; a refcounted GTK handle.
     nav: adw::NavigationView,
-    /// The logs page, while one is open. Holding the `Controller` *is* what
-    /// keeps its log stream alive — dropping it (on navigate-back) shuts the
-    /// component down, which cancels the stream via `drop_on_shutdown`.
-    logs: Option<Controller<LogsPage>>,
-    /// The detail page, while one is open — same lifetime story as `logs`.
+    /// The detail page, while one is open. Holding the `Controller` keeps it
+    /// alive; dropping it (on navigate-back) shuts it and its embedded logs
+    /// stream down via `drop_on_shutdown`.
     detail: Option<Controller<ContainerDetailPage>>,
     /// Held so `update` can raise toasts. This is a refcounted GTK handle, not
     /// shared model state — cloning it is just a pointer bump, and it's the
@@ -81,12 +78,10 @@ pub enum AppMsg {
     Remove(String),
     /// The user confirmed the dialog. This is the one that actually removes.
     RemoveConfirmed(String),
-    /// Open the logs page for a container.
-    ShowLogs(String),
     /// Open the detail page for a container.
     ShowDetails(String),
-    /// A pushed page (logs or detail) was popped — back button, Escape, swipe.
-    /// Drops whichever controller is open, which stops any stream it owns.
+    /// The detail page was popped — back button, Escape, swipe. Drops its
+    /// controller, which stops the streams it owns (stats and logs).
     PageClosed,
     Error(String),
     /// The window became visible or stopped being visible. GTK reports this for
@@ -243,8 +238,8 @@ impl Component for AppModel {
 
             #[local_ref]
             toast_overlay -> adw::ToastOverlay {
-                // The navigation stack. Root page = the container list; the logs
-                // page is pushed on top from `update` and pops back to here.
+                // The navigation stack. Root page = the container list; the
+                // detail page is pushed on top from `update` and pops back here.
                 #[local_ref]
                 nav -> adw::NavigationView {
                     adw::NavigationPage {
@@ -347,7 +342,6 @@ impl Component for AppModel {
                 ContainerRowOutput::Stop(id) => AppMsg::Stop(id),
                 ContainerRowOutput::Restart(id) => AppMsg::Restart(id),
                 ContainerRowOutput::Remove(id) => AppMsg::Remove(id),
-                ContainerRowOutput::ShowLogs(id) => AppMsg::ShowLogs(id),
                 ContainerRowOutput::ShowDetails(id) => AppMsg::ShowDetails(id),
             });
 
@@ -359,7 +353,6 @@ impl Component for AppModel {
             refreshing: false,
             poll: None,
             nav: adw::NavigationView::new(),
-            logs: None,
             detail: None,
             toast_overlay: adw::ToastOverlay::new(),
         };
@@ -369,7 +362,7 @@ impl Component for AppModel {
         let container_group = model.containers.widget();
         let widgets = view_output!();
 
-        // A pop means the user left the logs page (the only thing we push), so
+        // A pop means the user left the detail page (the only thing we push), so
         // let the reducer drop its controller and resume polling.
         let popped = sender.input_sender().clone();
         model.nav.connect_popped(move |_, _| {
@@ -439,25 +432,6 @@ impl Component for AppModel {
                 dialog.present(Some(root));
             }
 
-            AppMsg::ShowLogs(id) => {
-                let Some(docker) = self.docker.clone() else {
-                    return;
-                };
-                let title = self.name_of(&id);
-
-                // Build the page and push it. Storing the controller keeps its
-                // log stream alive; `.detach()` because the page reports nothing
-                // back — navigation is handled by the `popped` signal.
-                let controller = LogsPage::builder()
-                    .launch(LogsInit { docker, id, title })
-                    .detach();
-                self.nav.push(controller.widget());
-                self.logs = Some(controller);
-
-                // Nothing on the list page is visible now, so stop polling it.
-                self.stop_poll();
-            }
-
             AppMsg::ShowDetails(id) => {
                 let Some(docker) = self.docker.clone() else {
                     return;
@@ -483,9 +457,8 @@ impl Component for AppModel {
             }
 
             AppMsg::PageClosed => {
-                // Drop whichever page was open. Dropping its controller shuts
-                // the component down, cancelling any stream it owns (logs).
-                self.logs = None;
+                // Dropping the detail controller shuts it — and its embedded
+                // logs stream — down. Resume the list.
                 self.detail = None;
                 self.start_poll(&sender);
                 sender.input(AppMsg::Refresh);
