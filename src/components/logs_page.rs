@@ -29,21 +29,36 @@ pub struct LogsInit {
 
 pub struct LogsPage {
     title: String,
-    /// Held so `update_cmd` can append to it off the view. A refcounted GTK
-    /// handle, same escape hatch as `AppModel`'s `toast_overlay`.
+    /// Whether long lines wrap. Toggled from the header; drives the view's wrap
+    /// mode via `#[watch]`.
+    wrap: bool,
+    /// Whether we're pinned to the bottom (following). Set false when the user
+    /// scrolls up, true again when they return to the bottom — so following
+    /// doesn't yank the view away while they read scrollback.
+    follow: bool,
+    /// Held so `update_cmd` can append to the buffer. A refcounted GTK handle,
+    /// same escape hatch as `AppModel`'s `toast_overlay`.
     view: gtk::TextView,
-    /// A mark tracking the end of the buffer, used to follow the bottom.
-    ///
-    /// We scroll to this *mark* rather than to an iter because
-    /// `scroll_to_iter` silently does nothing while the view isn't laid out
-    /// yet — which is exactly the first-paint case, and why the view used to
-    /// open scrolled to the top. `scroll_to_mark` defers until the view is
-    /// realized, so the initial jump to the bottom actually lands.
-    bottom: gtk::TextMark,
+    /// The scroll position, watched to implement follow. `Option` only because
+    /// it's captured after the widget tree exists (the `TextView` gets its
+    /// adjustment from the `ScrolledWindow` when adopted); it's `Some` for the
+    /// component's whole life.
+    vadj: Option<gtk::Adjustment>,
 }
 
-/// Messages from the streaming command. Not `AppMsg`-style input — these arrive
-/// on the command channel as the stream produces them.
+#[derive(Debug)]
+pub enum LogsInput {
+    /// Turn line wrapping on or off.
+    SetWrap(bool),
+    /// The scroll position changed; recompute whether we're at the bottom.
+    ScrolledManually,
+    /// The content resized (a line arrived); stay pinned to the bottom if
+    /// following.
+    ContentGrew,
+}
+
+/// Messages from the streaming command. Not `Input` — these arrive on the
+/// command channel as the stream produces them.
 #[derive(Debug)]
 pub enum LogsCmd {
     /// A decoded chunk of output.
@@ -57,7 +72,7 @@ pub enum LogsCmd {
 #[relm4::component(pub)]
 impl Component for LogsPage {
     type Init = LogsInit;
-    type Input = ();
+    type Input = LogsInput;
     type Output = ();
     type CommandOutput = LogsCmd;
 
@@ -66,9 +81,18 @@ impl Component for LogsPage {
             set_title: &model.title,
 
             adw::ToolbarView {
-                // An empty HeaderBar is enough — NavigationView fills in the
-                // back button automatically for a pushed page.
-                add_top_bar = &adw::HeaderBar {},
+                add_top_bar = &adw::HeaderBar {
+                    // NavigationView fills in the back button on the start side
+                    // automatically; this is the only control we add.
+                    pack_end = &gtk::ToggleButton {
+                        set_icon_name: "format-justify-fill-symbolic",
+                        set_tooltip_text: Some("Wrap long lines"),
+                        set_active: true,
+                        connect_toggled[sender] => move |button| {
+                            sender.input(LogsInput::SetWrap(button.is_active()));
+                        },
+                    },
+                },
 
                 #[wrap(Some)]
                 set_content = &gtk::ScrolledWindow {
@@ -83,6 +107,14 @@ impl Component for LogsPage {
                         set_right_margin: 8,
                         set_top_margin: 8,
                         set_bottom_margin: 8,
+                        // WordChar wraps mid-word if a token is longer than the
+                        // pane (a 285-char log line has no spaces to break on).
+                        #[watch]
+                        set_wrap_mode: if model.wrap {
+                            gtk::WrapMode::WordChar
+                        } else {
+                            gtk::WrapMode::None
+                        },
                     },
                 },
             },
@@ -95,16 +127,30 @@ impl Component for LogsPage {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let view = gtk::TextView::new();
-        let buffer = view.buffer();
-        // Right gravity (left_gravity = false) so the mark stays at the end as
-        // text is appended after it.
-        let bottom = buffer.create_mark(Some("bottom"), &buffer.end_iter(), false);
-        let model = LogsPage {
+        let mut model = LogsPage {
             title: init.title,
+            wrap: true,
+            follow: true,
             view: view.clone(),
-            bottom,
+            vadj: None,
         };
         let widgets = view_output!();
+
+        // Now that `view` is inside the ScrolledWindow, it has that window's
+        // vertical adjustment — the real scroll position. Watch it to implement
+        // follow, routing both signals through `update` so the `follow` flag
+        // stays in the model rather than an `Rc<Cell>`.
+        if let Some(vadj) = view.vadjustment() {
+            let on_scroll = sender.input_sender().clone();
+            vadj.connect_value_changed(move |_| {
+                on_scroll.send(LogsInput::ScrolledManually).ok();
+            });
+            let on_grow = sender.input_sender().clone();
+            vadj.connect_changed(move |_| {
+                on_grow.send(LogsInput::ContentGrew).ok();
+            });
+            model.vadj = Some(vadj);
+        }
 
         // The streaming command. `docker` and `id` are moved in and owned by the
         // async block, so the borrowing stream from `client::logs` stays valid
@@ -135,6 +181,37 @@ impl Component for LogsPage {
         ComponentParts { model, widgets }
     }
 
+    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>, _root: &Self::Root) {
+        if let LogsInput::SetWrap(wrap) = msg {
+            self.wrap = wrap;
+            return;
+        }
+
+        let Some(vadj) = &self.vadj else {
+            return;
+        };
+        match msg {
+            LogsInput::SetWrap(_) => {} // handled above
+
+            LogsInput::ScrolledManually => {
+                // At the bottom if the last pixel of content is visible. A small
+                // tolerance absorbs rounding; a real scroll-up is many pixels.
+                let distance = vadj.upper() - vadj.page_size() - vadj.value();
+                self.follow = distance < 1.0;
+            }
+
+            LogsInput::ContentGrew => {
+                // `scroll_to_iter`/`_mark` misfire before the view is laid out,
+                // which left the page opening scrolled to the top. Driving the
+                // adjustment works because `changed` fires *after* the new size
+                // is known — so this lands at the bottom even on first paint.
+                if self.follow {
+                    vadj.set_value(vadj.upper() - vadj.page_size());
+                }
+            }
+        }
+    }
+
     fn update_cmd(
         &mut self,
         msg: Self::CommandOutput,
@@ -150,13 +227,15 @@ impl Component for LogsPage {
 }
 
 impl LogsPage {
+    /// Insert text and trim the buffer. Scrolling is *not* done here — inserting
+    /// changes the content height, which fires the adjustment's `changed` signal
+    /// and lands in `ContentGrew`.
     fn append(&self, text: &str) {
         let buffer = self.view.buffer();
 
         let mut end = buffer.end_iter();
         buffer.insert(&mut end, text);
 
-        // Drop the oldest lines once we exceed the cap.
         let excess = buffer.line_count() - MAX_LINES;
         if excess > 0
             && let Some(mut cut) = buffer.iter_at_line(excess)
@@ -164,12 +243,5 @@ impl LogsPage {
             let mut start = buffer.start_iter();
             buffer.delete(&mut start, &mut cut);
         }
-
-        // Follow: keep the newest line in view. `yalign: 1.0` aligns the mark to
-        // the bottom edge, so the latest line sits at the bottom — like
-        // `docker logs -f`. Always scrolls down; reading scrollback while
-        // following isn't supported yet.
-        buffer.move_mark(&self.bottom, &buffer.end_iter());
-        self.view.scroll_to_mark(&self.bottom, 0.0, true, 0.0, 1.0);
     }
 }
