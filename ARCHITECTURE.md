@@ -393,7 +393,18 @@ Exposed and fixed the two staleness bugs described above.
 - Remove confirms via `adw::AlertDialog`. Raised the floor to `gnome_46`.
 - Fixed the menu not dismissing, and the action slot resizing mid-swap.
 
-`cargo clippy -- -D warnings` clean throughout.
+**[#5] First tests, and pausing the poll when hidden**
+
+- **10 tests** over `Container::from_summary` — the first in the project. Pure,
+  no daemon, 0.00s. Mutation-checked: breaking the slash-stripping fails
+  exactly the two name tests and leaves the other eight green.
+- The poll stops while the window isn't visible, via
+  `gtk::Window::is_suspended`. See "What the app actually costs" — this buys
+  wakeups, not CPU.
+- Established that plain `cargo clippy` doesn't lint tests; the bar is now
+  `--all-targets`.
+
+`cargo clippy --all-targets -- -D warnings` clean throughout.
 
 ### What testing actually caught
 
