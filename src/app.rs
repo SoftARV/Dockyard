@@ -10,8 +10,9 @@ use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
 use relm4::gtk::glib;
 use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
+use tracing::debug;
 
-use crate::components::container_row::{ContainerRow, ContainerRowOutput};
+use crate::components::container_row::{ContainerRow, ContainerRowInput, ContainerRowOutput};
 use crate::docker::client;
 use crate::docker::types::Container;
 
@@ -251,12 +252,38 @@ impl Component for AppModel {
             },
 
             CommandMsg::ContainersLoaded(containers) => {
-                // Rebuild wholesale. At a handful of containers this is far
-                // cheaper than diffing, and it keeps the reducer obvious.
-                let mut guard = self.containers.guard();
-                guard.clear();
-                for container in containers {
-                    guard.push_back(container);
+                // The poll fires every 2s, so what happens here happens 30 times
+                // a minute. Rebuilding the rows would destroy and recreate every
+                // widget each time, which throws away transient UI state — an
+                // open popover is parented to a row's menu button, so it would
+                // slam shut on the next tick.
+                //
+                // Containers are sorted by name, so in the steady state the ids
+                // line up positionally and we can update each row in place.
+                let unchanged_membership = self.containers.len() == containers.len()
+                    && self
+                        .containers
+                        .iter()
+                        .zip(&containers)
+                        .all(|(row, container)| row.id() == container.id);
+
+                if unchanged_membership {
+                    for (index, container) in containers.into_iter().enumerate() {
+                        self.containers
+                            .send(index, ContainerRowInput::Update(container));
+                    }
+                } else {
+                    // A container appeared or disappeared. Rebuilding is fine
+                    // here: it's rare, and the row set genuinely changed.
+                    debug!(
+                        count = containers.len(),
+                        "container set changed, rebuilding rows"
+                    );
+                    let mut guard = self.containers.guard();
+                    guard.clear();
+                    for container in containers {
+                        guard.push_back(container);
+                    }
                 }
             }
 

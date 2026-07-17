@@ -19,11 +19,30 @@ pub enum ContainerRowOutput {
 }
 
 #[derive(Debug)]
+pub enum ContainerRowInput {
+    /// Fresh data for this row from the poll, applied in place.
+    Update(Container),
+    /// The start/stop button was clicked.
+    ///
+    /// The decision deliberately happens here rather than in the button's
+    /// closure. A closure captures its values once, when the widget is built —
+    /// so a captured `is_running` would be frozen at whatever the state was
+    /// then, and every later poll would leave it more wrong. Reading
+    /// `self.container` at click time is always current.
+    ToggleClicked,
+}
+
+#[derive(Debug)]
 pub struct ContainerRow {
     container: Container,
 }
 
 impl ContainerRow {
+    /// Lets the parent match rows against incoming containers without cloning.
+    pub fn id(&self) -> &str {
+        &self.container.id
+    }
+
     /// "postgres:17-alpine · Up 39 minutes (healthy) · 5432:5432"
     fn subtitle(&self) -> String {
         let mut parts = vec![self.container.image.clone()];
@@ -72,43 +91,46 @@ impl ContainerRow {
 #[relm4::factory(pub)]
 impl FactoryComponent for ContainerRow {
     type Init = Container;
-    type Input = ();
+    type Input = ContainerRowInput;
     type Output = ContainerRowOutput;
     type CommandOutput = ();
     type ParentWidget = adw::PreferencesGroup;
 
     view! {
         adw::ActionRow {
+            #[watch]
             set_title: &self.container.name,
+            #[watch]
             set_subtitle: &self.subtitle(),
             set_subtitle_lines: 1,
 
             add_prefix = &gtk::Image {
+                #[watch]
                 set_icon_name: Some(self.status_icon()),
-                add_css_class: self.status_css(),
+                // `set_css_classes` replaces the list; `add_css_class` appends.
+                // Under #[watch] the appending form would accumulate, so a
+                // container that ran and then exited would end up styled both
+                // "success" and "dim-label" at once.
+                #[watch]
+                set_css_classes: &[self.status_css()],
             },
 
             add_suffix = &gtk::Button {
+                #[watch]
                 set_icon_name: if self.container.state.is_running() {
                     "media-playback-stop-symbolic"
                 } else {
                     "media-playback-start-symbolic"
                 },
                 set_valign: gtk::Align::Center,
+                #[watch]
                 set_tooltip_text: Some(if self.container.state.is_running() {
                     "Stop"
                 } else {
                     "Start"
                 }),
                 add_css_class: "flat",
-                connect_clicked[sender, id = self.container.id.clone(), running = self.container.state.is_running()] => move |_| {
-                    let msg = if running {
-                        ContainerRowOutput::Stop(id.clone())
-                    } else {
-                        ContainerRowOutput::Start(id.clone())
-                    };
-                    sender.output(msg).ok();
-                },
+                connect_clicked => ContainerRowInput::ToggleClicked,
             },
 
             add_suffix = &gtk::Button {
@@ -161,5 +183,23 @@ impl FactoryComponent for ContainerRow {
         _sender: FactorySender<Self>,
     ) -> Self {
         Self { container }
+    }
+
+    fn update(&mut self, msg: Self::Input, sender: FactorySender<Self>) {
+        match msg {
+            // Swapping the data is enough: the #[watch] setters above re-run
+            // against the new value and mutate only the widgets that changed.
+            ContainerRowInput::Update(container) => self.container = container,
+
+            ContainerRowInput::ToggleClicked => {
+                let id = self.container.id.clone();
+                let msg = if self.container.state.is_running() {
+                    ContainerRowOutput::Stop(id)
+                } else {
+                    ContainerRowOutput::Start(id)
+                };
+                sender.output(msg).ok();
+            }
+        }
     }
 }
