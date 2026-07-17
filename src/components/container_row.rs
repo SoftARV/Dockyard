@@ -151,36 +151,51 @@ impl FactoryComponent for ContainerRow {
                 set_css_classes: &[self.status_css()],
             },
 
-            // Stands in for the start/stop button while Docker works. Stopping a
-            // container can take the full 10s SIGTERM grace period before
-            // SIGKILL, which is long enough to look like nothing happened.
-            add_suffix = &gtk::Spinner {
-                #[watch]
-                set_visible: self.busy,
-                // Only spin when shown; a hidden spinner still burns frames.
-                #[watch]
-                set_spinning: self.busy,
+            // The button and its spinner share one Stack, so the row keeps a
+            // single stable slot. As two separate suffixes they had different
+            // natural sizes, so swapping them resized the slot and shunted
+            // everything to the right of it sideways. A Stack allocates the
+            // largest child's size to all of them, so the controls hold still
+            // while the contents swap.
+            add_suffix = &gtk::Stack {
                 set_valign: gtk::Align::Center,
-            },
+                set_hhomogeneous: true,
+                set_vhomogeneous: true,
 
-            add_suffix = &gtk::Button {
-                #[watch]
-                set_visible: !self.busy,
-                #[watch]
-                set_icon_name: if self.container.state.is_running() {
-                    "media-playback-stop-symbolic"
-                } else {
-                    "media-playback-start-symbolic"
+                add_named[Some("action")] = &gtk::Button {
+                    #[watch]
+                    set_icon_name: if self.container.state.is_running() {
+                        "media-playback-stop-symbolic"
+                    } else {
+                        "media-playback-start-symbolic"
+                    },
+                    #[watch]
+                    set_tooltip_text: Some(if self.container.state.is_running() {
+                        "Stop"
+                    } else {
+                        "Start"
+                    }),
+                    add_css_class: "flat",
+                    connect_clicked => ContainerRowInput::ToggleClicked,
                 },
-                set_valign: gtk::Align::Center,
+
+                // Stopping a container can take the full 10s SIGTERM grace
+                // period before SIGKILL — long enough to look like nothing
+                // happened.
+                add_named[Some("busy")] = &gtk::Spinner {
+                    // Keep the spinner at its natural size, centred in the
+                    // button's slot, rather than stretched to fill it.
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+                    // Only spin while shown; a hidden spinner still burns frames.
+                    #[watch]
+                    set_spinning: self.busy,
+                },
+
+                // Set after the children exist: naming a child that hasn't been
+                // added yet is a GTK-CRITICAL.
                 #[watch]
-                set_tooltip_text: Some(if self.container.state.is_running() {
-                    "Stop"
-                } else {
-                    "Start"
-                }),
-                add_css_class: "flat",
-                connect_clicked => ContainerRowInput::ToggleClicked,
+                set_visible_child_name: if self.busy { "busy" } else { "action" },
             },
 
             add_suffix = &gtk::Button {
