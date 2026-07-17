@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Dockyard
+GenericName=Container Manager
+Comment=Manage Docker containers
+# Bare command: `make install` puts the binary in ~/.local/bin, which is on PATH.
+Exec=dockyard
+# Icon and app ID share the name on purpose — GNOME resolves the launcher, the
+# window (by Wayland app_id) and the themed icon all through this one string.
+Icon=dev.miguelrincon.Dockyard
+Terminal=false
+Categories=System;
+Keywords=docker;container;
