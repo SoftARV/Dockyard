@@ -12,7 +12,7 @@ use bollard::Docker;
 use futures_util::{FutureExt, StreamExt};
 use relm4::adw::prelude::*;
 use relm4::gtk::gdk;
-use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
+use relm4::{Component, ComponentParts, ComponentSender, RelmWidgetExt, adw, gtk};
 
 use crate::docker::client;
 
@@ -89,20 +89,35 @@ impl Component for LogsPage {
             adw::ToolbarView {
                 add_top_bar = &adw::HeaderBar {
                     // NavigationView adds the back button on the start side.
-                    pack_end = &gtk::ToggleButton {
-                        set_icon_name: "format-justify-fill-symbolic",
-                        set_tooltip_text: Some("Wrap long lines"),
-                        set_active: true,
-                        connect_toggled[sender] => move |button| {
-                            sender.input(LogsInput::SetWrap(button.is_active()));
-                        },
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_icon_name: "document-open-recent-symbolic",
-                        set_tooltip_text: Some("Show timestamps"),
-                        set_active: false,
-                        connect_toggled[sender] => move |button| {
-                            sender.input(LogsInput::SetTimestamps(button.is_active()));
+                    // One menu button instead of a row of cryptic icon toggles.
+                    // The popover spells the options out, with a checkbox each.
+                    pack_end = &gtk::MenuButton {
+                        set_icon_name: "view-more-symbolic",
+                        set_tooltip_text: Some("View options"),
+
+                        #[wrap(Some)]
+                        set_popover = &gtk::Popover {
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 6,
+                                set_margin_all: 6,
+
+                                gtk::CheckButton {
+                                    set_label: Some("Wrap long lines"),
+                                    set_active: true,
+                                    connect_toggled[sender] => move |check| {
+                                        sender.input(LogsInput::SetWrap(check.is_active()));
+                                    },
+                                },
+
+                                gtk::CheckButton {
+                                    set_label: Some("Show timestamps"),
+                                    set_active: false,
+                                    connect_toggled[sender] => move |check| {
+                                        sender.input(LogsInput::SetTimestamps(check.is_active()));
+                                    },
+                                },
+                            },
                         },
                     },
                 },
