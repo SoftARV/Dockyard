@@ -160,8 +160,10 @@ src/
     types.rs           # our Container / ContainerState / Port structs (+ tests)
   components/
     mod.rs
-    container_row.rs   # FactoryComponent -> adw::ActionRow
-    logs_page.rs       # Component -> adw::NavigationPage, streaming log view
+    container_row.rs      # FactoryComponent -> adw::ActionRow
+    container_detail.rs   # Component -> detail dashboard (status/uptime/CPU/mem graphs)
+    logs_page.rs          # Component -> adw::NavigationPage, streaming log view
+    status_chip.rs        # shared: state -> chip label + colour-variant class
 data/
   dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
   icons/hicolor/{16x16,...,512x512,scalable}/apps/dev.miguelrincon.Dockyard.{png,svg}

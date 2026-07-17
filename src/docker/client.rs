@@ -11,12 +11,13 @@ use bollard::Docker;
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
     InspectContainerOptions, ListContainersOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions,
+    RemoveContainerOptions, RestartContainerOptions, StartContainerOptions, StatsOptionsBuilder,
+    StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use tracing::{debug, info, warn};
 
-use super::types::{Container, ContainerDetail};
+use super::types::{Container, ContainerDetail, Stats};
 
 const ROOTFUL_SOCKET: &str = "/var/run/docker.sock";
 
@@ -192,6 +193,28 @@ pub async fn inspect(docker: &Docker, id: &str) -> Result<ContainerDetail> {
         .await
         .map_err(rejected)?;
     Ok(ContainerDetail::from_inspect(resp))
+}
+
+/// Stream live resource samples (CPU %, memory) for a running container.
+///
+/// Like `logs`, this borrows `docker` and `id`; the consuming block owns them.
+/// Incomplete frames — the first one, before Docker has two readings to diff —
+/// are filtered out (`Stats::from_response` returns `None`), so the graphs only
+/// ever see real samples.
+pub fn stats<'a>(
+    docker: &'a Docker,
+    id: &'a str,
+) -> impl Stream<Item = Result<Stats, String>> + Send + 'a {
+    let options = StatsOptionsBuilder::default().stream(true).build();
+
+    docker
+        .stats(id, Some(options))
+        .filter_map(|item| async move {
+            match item {
+                Ok(resp) => Stats::from_response(resp).map(Ok),
+                Err(err) => Some(Err(short_reason(&err))),
+            }
+        })
 }
 
 /// Stream a container's logs: the last 200 lines, then live output as it

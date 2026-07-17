@@ -5,7 +5,7 @@
 //! in sight, so the `view!` macro stays readable.
 
 use bollard::models::{
-    ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary,
+    ContainerInspectResponse, ContainerStateStatusEnum, ContainerStatsResponse, ContainerSummary,
     ContainerSummaryStateEnum, PortSummary, PortSummaryTypeEnum,
 };
 
@@ -214,6 +214,61 @@ impl ContainerDetail {
     }
 }
 
+/// One resource sample from the stats stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stats {
+    /// CPU as a percentage. Can exceed 100 on multiple cores (like `docker
+    /// stats`), which is why it's not clamped.
+    pub cpu_percent: f64,
+    /// Memory the container is using, in bytes.
+    pub mem_used: u64,
+    /// The memory limit, in bytes. 0 if unset.
+    pub mem_limit: u64,
+}
+
+impl Stats {
+    /// Compute a sample from one stats frame. Docker includes the previous
+    /// reading (`precpu_stats`) in each frame, so CPU% comes from the delta
+    /// between the two. Returns `None` for an incomplete frame (the first one,
+    /// or a stopped container) rather than a bogus zero.
+    pub fn from_response(resp: ContainerStatsResponse) -> Option<Stats> {
+        let cpu = resp.cpu_stats?;
+        let pre = resp.precpu_stats?;
+
+        let cpu_total = cpu.cpu_usage?.total_usage?;
+        let pre_total = pre.cpu_usage.and_then(|u| u.total_usage).unwrap_or(0);
+        let system = cpu.system_cpu_usage?;
+        let pre_system = pre.system_cpu_usage.unwrap_or(0);
+
+        let cpu_delta = cpu_total.saturating_sub(pre_total) as f64;
+        let system_delta = system.saturating_sub(pre_system) as f64;
+        // online_cpus is missing on some daemons; fall back to the per-CPU list.
+        let cpus = cpu.online_cpus.map(|n| n as f64).unwrap_or(1.0).max(1.0);
+
+        let cpu_percent = if system_delta > 0.0 {
+            cpu_delta / system_delta * cpus * 100.0
+        } else {
+            0.0
+        };
+
+        let mem = resp.memory_stats?;
+        let usage = mem.usage?;
+        // Docker's own calc subtracts the reclaimable page cache (`inactive_file`
+        // on cgroup v2) so the figure matches `docker stats`.
+        let inactive = mem
+            .stats
+            .as_ref()
+            .and_then(|s| s.get("inactive_file").copied())
+            .unwrap_or(0);
+
+        Some(Stats {
+            cpu_percent,
+            mem_used: usage.saturating_sub(inactive),
+            mem_limit: mem.limit.unwrap_or(0),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +299,70 @@ mod tests {
             ..Default::default()
         };
         assert!(Container::from_summary(summary).is_none());
+    }
+
+    #[test]
+    fn computes_cpu_percent_from_the_delta() {
+        use bollard::models::{ContainerCpuStats, ContainerCpuUsage, ContainerMemoryStats};
+
+        let cpu = |total, system| ContainerCpuStats {
+            cpu_usage: Some(ContainerCpuUsage {
+                total_usage: Some(total),
+                ..Default::default()
+            }),
+            system_cpu_usage: Some(system),
+            online_cpus: Some(2),
+            ..Default::default()
+        };
+        let resp = ContainerStatsResponse {
+            cpu_stats: Some(cpu(200, 2000)),
+            precpu_stats: Some(cpu(100, 1000)),
+            memory_stats: Some(ContainerMemoryStats {
+                usage: Some(1000),
+                limit: Some(4000),
+                stats: Some([("inactive_file".to_owned(), 200)].into_iter().collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let stats = Stats::from_response(resp).expect("complete frame");
+        // cpu_delta 100 / system_delta 1000 * 2 cpus * 100 = 20%
+        assert!((stats.cpu_percent - 20.0).abs() < 1e-9);
+        // 1000 usage minus 200 reclaimable cache
+        assert_eq!(stats.mem_used, 800);
+        assert_eq!(stats.mem_limit, 4000);
+    }
+
+    #[test]
+    fn incomplete_stats_frame_is_none() {
+        // No cpu_stats -> the first frame / a stopped container. Skip, don't zero.
+        assert!(Stats::from_response(ContainerStatsResponse::default()).is_none());
+    }
+
+    #[test]
+    fn zero_system_delta_doesnt_divide_by_zero() {
+        use bollard::models::{ContainerCpuStats, ContainerCpuUsage, ContainerMemoryStats};
+        let cpu = ContainerCpuStats {
+            cpu_usage: Some(ContainerCpuUsage {
+                total_usage: Some(100),
+                ..Default::default()
+            }),
+            system_cpu_usage: Some(1000),
+            online_cpus: Some(1),
+            ..Default::default()
+        };
+        let resp = ContainerStatsResponse {
+            cpu_stats: Some(cpu.clone()),
+            precpu_stats: Some(cpu), // same values -> zero deltas
+            memory_stats: Some(ContainerMemoryStats {
+                usage: Some(500),
+                limit: Some(1000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(Stats::from_response(resp).unwrap().cpu_percent, 0.0);
     }
 
     #[test]
