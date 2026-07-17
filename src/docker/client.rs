@@ -202,10 +202,14 @@ pub fn logs<'a>(
     docker: &'a Docker,
     id: &'a str,
 ) -> impl Stream<Item = Result<String, String>> + Send + 'a {
+    // Always ask Docker to prepend its own RFC3339 timestamp. The view parses
+    // it off and shows it only when asked — so the timestamp toggle is pure
+    // presentation and never has to restart the stream.
     let options = LogsOptionsBuilder::default()
         .follow(true)
         .stdout(true)
         .stderr(true)
+        .timestamps(true)
         .tail("200")
         .build();
 
