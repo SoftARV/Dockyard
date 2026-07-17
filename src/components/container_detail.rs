@@ -67,44 +67,49 @@ impl Component for ContainerDetailPage {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 18,
 
-                            // Hero: name + status chip.
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 12,
-
-                                gtk::Label {
-                                    set_label: &model.container.name,
-                                    add_css_class: "title-1",
-                                    set_hexpand: true,
-                                    set_halign: gtk::Align::Start,
-                                    set_xalign: 0.0,
-                                    set_ellipsize: gtk::pango::EllipsizeMode::End,
-                                },
-                                gtk::Label {
-                                    set_valign: gtk::Align::Center,
-                                    #[watch]
-                                    set_label: status_chip::label(model.container.state),
-                                    #[watch]
-                                    set_css_classes: &[
-                                        "status-chip",
-                                        status_chip::variant(model.container.state),
-                                    ],
-                                },
-                            },
-
-                            // Stat tiles. Uptime now; CPU/memory join here in the
-                            // follow-up. Homogeneous so tiles share the width.
+                            // Stat tiles: status and uptime, side by side.
+                            // CPU/memory join this row in the follow-up.
+                            // Homogeneous so the tiles share the width.
                             gtk::Box {
                                 set_orientation: gtk::Orientation::Horizontal,
                                 set_spacing: 12,
                                 set_homogeneous: true,
 
+                                // Status tile — the chip on its own card.
                                 gtk::Box {
                                     add_css_class: "card",
 
                                     gtk::Box {
                                         set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 4,
+                                        set_spacing: 6,
+                                        set_margin_all: 14,
+
+                                        gtk::Label {
+                                            set_label: "STATUS",
+                                            add_css_class: "caption",
+                                            add_css_class: "dim-label",
+                                            set_halign: gtk::Align::Start,
+                                        },
+                                        gtk::Label {
+                                            set_halign: gtk::Align::Start,
+                                            #[watch]
+                                            set_label: status_chip::label(model.container.state),
+                                            #[watch]
+                                            set_css_classes: &[
+                                                "status-chip",
+                                                status_chip::variant(model.container.state),
+                                            ],
+                                        },
+                                    },
+                                },
+
+                                // Uptime tile.
+                                gtk::Box {
+                                    add_css_class: "card",
+
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 6,
                                         set_margin_all: 14,
 
                                         gtk::Label {
