@@ -91,10 +91,13 @@ src/
   app.rs                      root Component — the store + reducer + view
   docker/
     client.rs                 socket discovery, connect, ping, API wrappers
-    types.rs                  our Container/ContainerState/Port
+    types.rs                  our Container/ContainerState/Port/ContainerDetail/Stats
   components/
     container_row.rs          FactoryComponent -> adw::ActionRow
+    container_detail.rs       Component -> detail dashboard (status/uptime/CPU/mem)
     logs_page.rs              Component -> adw::NavigationPage, streaming log view
+    status_chip.rs            shared state -> chip label + colour-variant class
+main.rs also carries the one custom stylesheet (the .status-chip pill).
 data/
   dev.miguelrincon.Dockyard.desktop    launcher entry
   icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
@@ -521,8 +524,26 @@ of a blank group. A `gtk::Stack` flips between the list and the status page on
 list widget every time the last container goes.
 
 **v1 feature-complete** — list, start/stop/restart/remove, logs, empty state,
-and desktop integration are all built. Everything below is polish or
-explicitly-deferred v2 work.
+and desktop integration are all built.
+
+**Beyond v1 (scope relaxed to a reminder).** The out-of-scope list became a
+"stay lean, flag drift" reminder rather than a ban, which unblocked:
+
+**[#13] Log-view polish** — scroll-preserving timestamp toggle (via an invisible
+tag, not a rebuild), theme-adaptive timestamp colour, a labelled options menu.
+
+**[#14] Container detail dashboard** — clicking a row pushes a detail page: a
+status *chip* (the one bit of custom CSS — no libadwaita chip widget exists),
+live uptime, details and ports as cards, and a start/stop button (`adw::Button
+Content`, icon + label). Re-inspects every 2s so the chip/button/uptime stay
+live; the same status chip is reused in the list rows. This is where the app
+starts moving from "manager" toward "monitor" — a conscious, flagged choice.
+
+**[#15] Resource graphs** — CPU and memory tiles on the detail page: current
+value plus a cairo sparkline (relm4's `DrawHandler`, no charting dependency).
+`client::stats` streams `docker.stats`; CPU% is the cpu/precpu delta Docker puts
+in each frame, unit-tested. The stream runs only while the container is up and
+restarts when it comes back.
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
