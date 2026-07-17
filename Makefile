@@ -11,7 +11,7 @@ APPID    = dev.miguelrincon.Dockyard
 
 ICON_SIZES = 16 32 48 64 128 256 512
 
-.PHONY: all build run test check install uninstall clean
+.PHONY: all build run test check install dev-install uninstall clean
 
 all: build
 
@@ -30,8 +30,16 @@ check:
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 
-install: build
+install: build dev-install
 	install -Dm755 target/release/dockyard $(BINDIR)/dockyard
+	@echo "Installed to $(PREFIX). Launch 'Dockyard' from the app grid, or run 'dockyard'."
+
+# Everything except the release binary: the .desktop entry and the icons.
+#
+# This is what makes the icon appear, including for `cargo run`. On Wayland
+# GNOME reads the icon from the installed .desktop matched by app_id, so once
+# this has run once, dev builds show the icon too — no release build needed.
+dev-install:
 	install -Dm644 data/$(APPID).desktop $(DATADIR)/applications/$(APPID).desktop
 	install -Dm644 data/icons/hicolor/scalable/apps/$(APPID).svg \
 		$(DATADIR)/icons/hicolor/scalable/apps/$(APPID).svg
@@ -40,11 +48,15 @@ install: build
 			$(DATADIR)/icons/hicolor/$${sz}x$${sz}/apps/$(APPID).png; \
 	done
 	# Refresh the caches so the icon and launcher appear without a re-login.
-	# The desktop mtime bump is what tells the icon cache it's stale.
-	-touch $(DATADIR)/icons/hicolor
-	-gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor
+	# gtk-update-icon-cache needs an index.theme to build a valid cache; a
+	# user-local hicolor dir usually has none, and there GNOME just scans the
+	# directory instead — so only run it where it can actually succeed, rather
+	# than printing a scary "cache was invalid" that doesn't matter.
+	@if [ -f $(DATADIR)/icons/hicolor/index.theme ]; then \
+		touch $(DATADIR)/icons/hicolor; \
+		gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor; \
+	fi
 	-update-desktop-database -q $(DATADIR)/applications
-	@echo "Installed to $(PREFIX). Launch 'Dockyard' from the app grid, or run 'dockyard'."
 
 uninstall:
 	rm -f $(BINDIR)/dockyard
@@ -53,7 +65,9 @@ uninstall:
 	@for sz in $(ICON_SIZES); do \
 		rm -f $(DATADIR)/icons/hicolor/$${sz}x$${sz}/apps/$(APPID).png; \
 	done
-	-gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor
+	@if [ -f $(DATADIR)/icons/hicolor/index.theme ]; then \
+		gtk-update-icon-cache -q -t -f $(DATADIR)/icons/hicolor; \
+	fi
 	-update-desktop-database -q $(DATADIR)/applications
 	@echo "Uninstalled from $(PREFIX)."
 
