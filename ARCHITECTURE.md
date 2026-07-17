@@ -400,11 +400,58 @@ Exposed and fixed the two staleness bugs described above.
   exactly the two name tests and leaves the other eight green.
 - The poll stops while the window isn't visible, via
   `gtk::Window::is_suspended`. See "What the app actually costs" — this buys
-  wakeups, not CPU.
+  wakeups, not CPU. Both halves confirmed by hand: minimise stops the poll
+  (after GNOME's ~4s lag), restoring starts it again. The resume path needed a
+  human, since Wayland refuses a scripted `present()`.
 - Established that plain `cargo clippy` doesn't lint tests; the bar is now
   `--all-targets`.
 
 `cargo clippy --all-targets -- -D warnings` clean throughout.
+
+### Testing the parts the compiler can't reach
+
+The app narrates itself, so most behaviour can be checked by watching the log
+rather than squinting at pixels:
+
+```bash
+RUST_LOG=dockyard=debug cargo run 2>&1 | grep --line-buffered -E "poll|visibility|rebuilding"
+```
+
+- **Poll gating.** Minimise (`Super`+`H`) or switch workspace, wait ~5s for
+  GNOME's lag: `suspended=true` → `stopping poll`. Restore: `suspended=false` →
+  `starting poll`. Both halves must appear; if `starting poll` doesn't, the app
+  is silently frozen.
+- **Rows update in place.** `rebuilding rows` should appear exactly *once*, at
+  startup. If it fires on every poll, the reconcile has broken and open
+  popovers will slam shut.
+- **State changes reach the UI.** Change the world from another terminal —
+  `docker stop <name>` — and watch the row follow. Do it while minimised to
+  test that resuming refreshes immediately rather than waiting for a tick.
+- **Errors become toasts.** Use a throwaway container and try to remove it while
+  it's running. `remove_container` is deliberately unforced, so Docker refuses:
+
+  ```bash
+  docker run -d --name dockyard-test alpine sleep 3600
+  # in the app: ⋯ -> Remove -> confirm
+  docker rm -f dockyard-test        # cleanup
+  ```
+
+  Expect a toast carrying Docker's refusal, the row's spinner stopping, and the
+  container still running afterwards. Non-destructive and repeatable — the
+  failed remove leaves the container alone, which is the whole point of not
+  forcing it. Worth checking the toast is actually *readable*: bollard's errors
+  are verbose and an `adw::Toast` is one truncating line.
+
+  **Don't use a port conflict as the fixture.** It looks perfect — two
+  containers bound to the same host port can never run at once — and it is a
+  trap. A start that fails on port allocation can leave the container detached
+  from its network (`NetworkMode` set, `NetworkSettings.Networks` empty). From
+  then on it starts *successfully* with no network, no published port and no
+  error, because with no network there's nothing to publish a port on. The
+  fixture silently stops being a fixture, and you're left testing nothing.
+
+Only one copy runs at a time (D-Bus app ID), so `pkill -f target/debug/dockyard`
+before each run or the new one hands off to the old one and exits silently.
 
 ### What testing actually caught
 
@@ -435,13 +482,16 @@ for driving the UI, not just for green builds.
 
 - `ContainerState::is_running()` counts `Restarting` as running, so the button
   offers "stop" mid-restart. Defensible, not thought through.
+- **"Running" doesn't mean "working", and we can't tell.** A start that fails on
+  port allocation can leave a container detached from its network; it then
+  starts fine with only loopback, reachable by nothing. We draw it as an
+  ordinary "Up 3 minutes" row with no ports — accurate, because that is exactly
+  what Docker reports, and still misleading. The absent port is the only tell.
+  Surfacing it properly would mean inspecting networks, which CLAUDE.md puts
+  out of scope, so this stays a known blind spot rather than a TODO.
 - Nothing shows progress for `ShowLogs`, because logs don't exist yet.
-- The poll's *resume* path (window restored -> polling restarts) is unverified:
-  Wayland refuses a programmatic `present()`, so no script can restore a window
-  to test it. Suspend -> stop is verified. If the app ever looks frozen after
-  un-minimising, this is the first place to look.
 - GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
-  you minimise.
+  you minimise. Expected, not a bug — don't go looking for a faster signal.
 - `tokio` and `futures-util` are in `Cargo.toml` but unused by our code — relm4
   owns the tokio runtime. `futures-util` will be needed for the logs stream;
   `tokio` may never be.
