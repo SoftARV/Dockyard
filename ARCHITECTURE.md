@@ -94,8 +94,8 @@ src/
     types.rs                  our Container/ContainerState/Port/ContainerDetail/Stats
   components/
     container_row.rs          FactoryComponent -> adw::ActionRow
-    container_detail.rs       Component -> detail dashboard (status/uptime/CPU/mem)
-    logs_page.rs              Component -> adw::NavigationPage, streaming log view
+    container_detail.rs       Component -> responsive detail dashboard; embeds LogsView
+    logs_view.rs              Component -> embeddable Box, streaming log view
     status_chip.rs            shared state -> chip label + colour-variant class
 main.rs also carries the one custom stylesheet (the .status-chip pill).
 data/
@@ -183,31 +183,40 @@ shuts down, *drop the future*. Dropping a Rust future mid-`await` cancels it —
 the `stream.next()` is abandoned, the HTTP connection to Docker closes, the
 follow stops. No cancellation flag to check, no token to thread through.
 
-The trick is arranging for "component shuts down" to mean "user left the logs
-page". That's the lifecycle in `app.rs`:
+The trick is arranging for "component shuts down" to mean "user left the detail
+page". Since #18 the log view is no longer a page of its own — it's a
+`LogsView` (an embeddable `Box`) that the **detail page** owns. So the lifecycle
+is a two-level cascade:
 
-- `AppModel` holds `logs: Option<Controller<LogsPage>>`. **Holding the
-  controller is what keeps the component — and its stream — alive.**
+- `AppModel` holds `detail: Option<Controller<ContainerDetailPage>>`. The detail
+  page, in turn, holds a `Controller<LogsView>`. **Each owning handle keeps its
+  child — and its child's streams — alive.**
 - Navigate-back fires `NavigationView::popped`; the reducer sets
-  `self.logs = None`; the controller drops; the component shuts down;
-  `drop_on_shutdown` cancels the stream.
+  `self.detail = None`; the detail controller drops, which drops the `LogsView`
+  controller it owns; both components shut down; `drop_on_shutdown` cancels the
+  stats stream and the log follow together.
 
-So the stream lives exactly as long as the page is on screen, enforced by
+So the streams live exactly as long as the detail page is on screen, enforced by
 ownership rather than by remembering to clean up. This was verified, not
 assumed: with a container logging every 0.3s, chunks arrived while the page was
 open and *stopped the instant it closed* — a leaked follow would have kept
 printing.
 
-(Think of `Controller<LogsPage>` as an owning handle to a running child, a bit
+(Think of `Controller<LogsView>` as an owning handle to a running child, a bit
 like a React ref to a component whose `useEffect` cleanup is tied to the ref
 being dropped — except here the compiler guarantees the cleanup runs.)
 
-The **detail page's stats stream** is the same pattern, with one twist: it only
-streams while the container runs (Docker closes the stream when it stops), and a
-`stats_active` flag lets a later re-inspect restart it when the container comes
-back up. `drop_on_shutdown` still cancels it on navigate-back, and the graph
-data lives in the model, redrawn each sample via relm4's `DrawHandler` (a cairo
-surface) — no `Rc<RefCell>`.
+Both streams inside the detail page share one twist: they only run while the
+container runs — Docker closes the `stats` stream and ends the `logs --follow`
+stream when it stops. A guard flag (`stats_active` for stats, `streaming` for
+logs) lets the 2-second re-inspect restart the stream when the container comes
+back up, so **starting a container from inside the detail view revives both its
+graphs and its logs**. The detail page emits `LogsInput::EnsureStreaming` on
+each inspect where the container is up; `LogsView` opens a stream if it doesn't
+already have one (and clears its buffer first, so a restarted container's
+re-served `--tail` doesn't print twice). `drop_on_shutdown` still cancels
+everything on navigate-back, and the graph data lives in the model, redrawn each
+sample via relm4's `DrawHandler` (a cairo surface) — no `Rc<RefCell>`.
 
 ### `.clone()` on the Docker handle is not a copy
 
@@ -552,6 +561,23 @@ value plus a cairo sparkline (relm4's `DrawHandler`, no charting dependency).
 in each frame, unit-tested. The stream runs only while the container is up and
 restarts when it comes back.
 
+**[#18] Logs move into the detail page, responsively** — the standalone logs
+page is gone. `LogsPage` (an `adw::NavigationPage`) became `LogsView`, an
+embeddable `Box` the detail page owns; the per-row logs button and
+`AppMsg::ShowLogs` were removed, so logs are reached only by opening a
+container. The detail page is now responsive via an `adw::BreakpointBin` at
+`min-width: 720px`: the four stat cards reflow from 2×2 to a single row (a
+`gtk::FlowBox` whose `min/max-children-per-line` the breakpoint bumps to 4), and
+the info column (details + ports) sits above the logs when narrow, beside them
+when wide (the breakpoint flips a `Box`'s `orientation`). A follow-up fix: logs
+subscribe the same way stats do — a `streaming` guard plus an `EnsureStreaming`
+message the detail page emits on each inspect where the container is up — so
+starting a stopped container *from the detail view* revives its logs. The buffer
+is cleared on re-subscribe, because `docker logs --tail` re-serves the pre-stop
+lines and would otherwise print them twice. See "Streaming, and cancelling a
+stream" for the two-level ownership cascade that cancels both streams on
+navigate-back.
+
 ### How the app finds its own icon (and why Wayland is the twist)
 
 The instinct — "the app sets its window icon" — is **wrong on Wayland**, and
@@ -643,11 +669,15 @@ for driving the UI, not just for green builds.
 ### Next
 
 **v1 is complete** — list, lifecycle actions, logs, the empty state, and
-desktop integration are all done. What remains is minor polish:
+desktop integration are all done — and the detail dashboard (status/uptime
+cards, live CPU/memory graphs, embedded logs, responsive layout) is built on top
+of it. The two log-view polish items once listed here — the timestamp toggle
+resetting the scroll position, and the fixed-grey timestamp colour — were both
+resolved in #13 (invisible-tag toggle, theme-adaptive colour).
 
-- The timestamp toggle rebuild resets the scroll position.
-- The dim timestamp colour is a fixed grey, not theme-adaptive (text tags take
-  a colour, not a CSS class).
+No committed next feature. Candidates, only if they earn their keep on this one
+machine: `docker.events()` to replace polling (below), or surfacing container
+health beyond "running" (see "Known rough edges").
 
 ### Later, deliberately (v2)
 
@@ -677,7 +707,13 @@ desktop integration are all done. What remains is minor polish:
 - The rootless socket path is only reachable on a rootless install; on this
   machine it's tested by faking `XDG_RUNTIME_DIR`.
 
-### Out of scope — don't build these
+### Stay lean — flag the drift, don't gatekeep
 
-Image builds, `docker compose`, volumes, networks, registries, `exec`, resource
-graphs, multi-host. If a change starts growing toward Docker Desktop, stop.
+Image builds, `docker compose`, volumes, networks, registries, `exec`,
+multi-host. None are the default focus; the app is a personal, single-machine
+container manager, not Docker Desktop. This was a hard "out of scope" list once
+— it's now a reminder, matching CLAUDE.md's revised scope. When a change grows
+toward Docker Desktop, **name the cost and the direction** so it's a conscious
+choice, then build it if it's genuinely useful here. Resource graphs used to sit
+on this list; #15 built them anyway, precisely because they earned it — that's
+the posture, not an exception to it.
