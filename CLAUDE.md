@@ -40,7 +40,7 @@ Rust edition 2024. Plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `env-filter` — `main.rs` can't init tracing without it, and it gives `RUST_LOG`.
 
 `futures-util` is used by the logs stream (`StreamExt`/`FutureExt` in
-`client.rs` and `logs_page.rs`). `tokio` is pinned but **not** used directly by
+`client.rs` and `logs_view.rs`). `tokio` is pinned but **not** used directly by
 our code — relm4 owns the tokio runtime — and may never be.
 
 Enable relm4's `libadwaita` **and `gnome_46`** features. Do **not** add `gtk4`
@@ -161,8 +161,9 @@ src/
   components/
     mod.rs
     container_row.rs      # FactoryComponent -> adw::ActionRow
-    container_detail.rs   # Component -> detail dashboard (status/uptime/CPU/mem graphs)
-    logs_page.rs          # Component -> adw::NavigationPage, streaming log view
+    container_detail.rs   # Component -> responsive detail dashboard (status/uptime/CPU/mem
+                          #   cards, details, ports) that embeds a LogsView
+    logs_view.rs          # Component -> embeddable Box, streaming log view (lives in detail)
     status_chip.rs        # shared: state -> chip label + colour-variant class
 data/
   dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
@@ -205,7 +206,7 @@ enum AppMsg {
     Restart(String),
     Remove(String),                  // asks for confirmation
     RemoveConfirmed(String),         // actually removes
-    ShowLogs(String),
+    ShowDetails(String),             // push the detail page (logs live inside it)
     Error(String),
     SuspendedChanged(bool),          // window visible / not visible
 }
@@ -230,11 +231,16 @@ distinct. Everything arriving in `update_cmd` came from a command.
 ## UI shape
 
 - `adw::ApplicationWindow` > `adw::ToolbarView` > `adw::HeaderBar`
-- Main content: `adw::NavigationView`. Root page = container list, push a detail
-  page for logs.
+- Main content: `adw::NavigationView`. Root page = container list; clicking a row
+  pushes the detail page (a dashboard that embeds the streaming log view — there
+  is no separate logs page).
 - Each container is an `adw::ActionRow`: title = name, subtitle = image + status,
-  a status dot prefix, a start/stop button suffix, and a menu button for
-  restart/remove.
+  a status-chip prefix, a start/stop button suffix, and a menu button for
+  restart/remove. The row is activatable — clicking it opens the detail page.
+- The detail page is responsive (`adw::BreakpointBin` at `min-width: 720px`): the
+  four stat cards reflow from 2×2 to a single row of four (`gtk::FlowBox`), and the
+  info column (details + ports) sits above the logs when narrow, beside them when
+  wide.
 - Empty state and disconnected state: `adw::StatusPage`.
 - Errors: `adw::ToastOverlay` wrapping the content.
 - **Use libadwaita widgets, not raw GTK equivalents.** `adw::ActionRow` over a
@@ -278,10 +284,18 @@ In scope for v1:
 - ✅ Start / stop / restart / remove
 - ✅ View logs (`docker.logs()` with `follow: true`, tail 200)
 
-**All three v1 features are built** (logs shipped in #10, with follow-scroll, a
-wrap toggle and a timestamp toggle). The `.desktop` file, icon, installer, and
+**All three v1 features are built** (logs shipped in #10 with follow-scroll, a
+wrap toggle and a timestamp toggle; #18 moved them into the detail page and
+dropped the standalone logs page). The `.desktop` file, icon, installer, and
 the "no containers" empty-state `adw::StatusPage` are all done too. v1 is
 complete.
+
+Beyond v1, the detail page (#13–#18) adds a resource dashboard — status/uptime
+cards, live CPU/memory graphs from the `stats` stream — and the embedded logs,
+laid out responsively. Note `resource graphs` appears in the "stay lean" list
+below; they were built anyway because they're genuinely useful here, which is
+exactly the "flag the drift, then build it if it helps" posture that list now
+takes.
 
 **A reminder to stay lean, not a hard ban** (revised — was "explicitly out of
 scope"): image builds, `docker compose`, volumes, networks, registries, `exec`
