@@ -16,7 +16,6 @@ pub enum ContainerRowOutput {
     Stop(String),
     Restart(String),
     Remove(String),
-    ShowLogs(String),
     ShowDetails(String),
 }
 
@@ -187,16 +186,6 @@ impl FactoryComponent for ContainerRow {
                 // added yet is a GTK-CRITICAL.
                 #[watch]
                 set_visible_child_name: if self.busy { "busy" } else { "action" },
-            },
-
-            add_suffix = &gtk::Button {
-                set_icon_name: "view-list-symbolic",
-                set_valign: gtk::Align::Center,
-                set_tooltip_text: Some("Logs"),
-                add_css_class: "flat",
-                connect_clicked[sender, id = self.container.id.clone()] => move |_| {
-                    sender.output(ContainerRowOutput::ShowLogs(id.clone())).ok();
-                },
             },
 
             add_suffix = &gtk::MenuButton {
