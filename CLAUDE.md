@@ -123,7 +123,7 @@ src/
     container_row.rs   # FactoryComponent -> adw::ActionRow
     logs_page.rs       # streaming log view
 data/
-  <app-id>.desktop.in
+  dev.miguelrincon.Dockyard.desktop.in
   icons/
 ```
 
@@ -212,9 +212,10 @@ For rootless: `systemctl --user enable --now docker`.
 
 - `cargo clippy -- -D warnings` is the bar, not `cargo build`.
 - Commits: conventional commits (`feat:`, `fix:`, `refactor:`).
-- App ID: `io.github.USER.DockerManager` — **rename this before the first
-  commit**, it's a placeholder. It must match the `.desktop` file name, the
-  GResource prefix, and `RelmApp::new()`.
+- App ID: `dev.miguelrincon.Dockyard`. It must match the `.desktop` file name,
+  the GResource prefix (`/dev/miguelrincon/Dockyard/`), and `RelmApp::new()`.
+  The app is called **Dockyard** — use that in the window title and `.desktop`
+  `Name=`, not "Docker Manager".
 - No Flatpak packaging for now. A Flatpak sandbox can't see the Docker socket
   without a `--filesystem` hole that defeats the point of the sandbox. Plain
   `cargo build --release` plus a `.desktop` file is the target.
