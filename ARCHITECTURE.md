@@ -494,16 +494,29 @@ Exposed and fixed the two staleness bugs described above.
 - The `.desktop` is plain, not `.desktop.in`: no build system means nothing to
   substitute.
 
-**[#10] Streaming log view**
+**[#10] Streaming log view** — the last v1 feature, and the first that streams.
 
-- The last v1 feature and the first that streams. Clicking a row's logs button
-  pushes a `LogsPage` onto an `adw::NavigationView` (the list is now its root
-  page). It follows `docker.logs()` into a monospace `TextView`.
-- Uses `command` + `drop_on_shutdown` so the stream is cancelled exactly when
-  the page closes — verified: zero chunks after navigate-back, against a
-  container logging continuously. See "Streaming, and cancelling a stream".
+- Clicking a row's logs button pushes a `LogsPage` onto an `adw::NavigationView`
+  (the list is now its root page). It follows `docker.logs()` into a monospace
+  `TextView`. Uses `command` + `drop_on_shutdown`, so the stream is cancelled
+  exactly when the page closes — verified: zero chunks after navigate-back,
+  against a container logging continuously. See "Streaming, and cancelling a
+  stream".
+- **Follow-scroll** driven by the scroll *adjustment*, not `scroll_to_iter`
+  (which misfires before layout, so the page used to open at the top). Snaps to
+  the bottom when content settles *if* you're already there, so it doesn't yank
+  the view while you read scrollback.
+- **Wrap toggle** in the header for the wide lines (~285 chars) container logs
+  produce; **timestamp toggle** (off by default) that shows Docker's own
+  RFC3339 stamp reduced to `HH:MM:SS`, dimmed — off by default because many
+  apps print their own and Docker's would double it.
+- Stayed with `GtkTextView` rather than a widget-per-line list, to keep native
+  cross-line copy-paste — the one thing you most want from a log pane.
 
-`cargo clippy --all-targets -- -D warnings` clean throughout.
+`cargo clippy --all-targets -- -D warnings` clean throughout; 22 unit tests.
+
+**v1 feature-complete after #10** — list, start/stop/restart/remove, and logs
+are all built. Everything below is polish or explicitly-deferred v2 work.
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
@@ -595,8 +608,13 @@ for driving the UI, not just for green builds.
 
 ### Next
 
+v1's scoped features are all done. What's left is polish, not scope:
+
 1. **Empty state** — an `adw::StatusPage` for "no containers", which currently
-   renders as a blank group. Small — and the last thing before v1 is complete.
+   renders as a blank group. Small.
+2. **Follow-scroll refinement** — the timestamp toggle rebuild resets the scroll
+   position; minor. And the dim timestamp colour is a fixed grey, not
+   theme-adaptive (text tags take a colour, not a CSS class).
 
 ### Later, deliberately
 
