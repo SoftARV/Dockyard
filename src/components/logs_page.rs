@@ -8,11 +8,10 @@
 //! (on navigate-back), the future is dropped and the follow stops. No manual
 //! cancellation token, no leaked stream running behind a page you've left.
 
-use std::collections::VecDeque;
-
 use bollard::Docker;
 use futures_util::{FutureExt, StreamExt};
 use relm4::adw::prelude::*;
+use relm4::gtk::gdk;
 use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
 
 use crate::docker::client;
@@ -20,15 +19,15 @@ use crate::docker::client;
 /// A chatty container follows forever, so the buffer is bounded: past this many
 /// lines the oldest are dropped. 5000 lines is a few MB — plenty of scrollback,
 /// nowhere near unbounded.
-const MAX_LINES: usize = 5000;
+const MAX_LINES: i32 = 5000;
 
 /// Blank space below each entry, so a wrapped multi-row line is still visually
 /// one entry, distinct from the next.
 const ENTRY_SPACING: i32 = 6;
 
-/// Mid-grey for the timestamp. Not theme-perfect, but readable on both light and
-/// dark; text tags take an explicit colour, not a CSS class.
-const TIMESTAMP_COLOR: &str = "#7f7f7f";
+/// How much to dim the timestamp relative to the theme's text colour — the same
+/// ~55% opacity libadwaita's `.dim-label` uses.
+const TIMESTAMP_DIM: f32 = 0.55;
 
 pub struct LogsInit {
     pub docker: Docker,
@@ -37,30 +36,20 @@ pub struct LogsInit {
     pub title: String,
 }
 
-/// One log entry, kept as structured data so the timestamp toggle can re-render
-/// without re-fetching. The buffer is derived from these; this is the truth.
-struct LogLine {
-    /// `HH:MM:SS` from Docker's timestamp, or empty for lines we synthesised
-    /// (errors, end-of-stream) or couldn't parse.
-    time: String,
-    message: String,
-}
-
 pub struct LogsPage {
     title: String,
     /// Long lines wrap. Toggled from the header, drives wrap mode via `#[watch]`.
     wrap: bool,
-    /// Show Docker's timestamp per line. Off by default (many apps print their
-    /// own); toggling re-renders from `lines`.
-    timestamps: bool,
     /// Pinned to the bottom (following). False while the user reads scrollback,
     /// true again at the bottom — so following doesn't yank the view away.
     follow: bool,
     view: gtk::TextView,
-    /// The dim tag applied to timestamps.
+    /// The tag on every timestamp. Timestamps are *always* inserted; this tag's
+    /// `invisible` property shows or hides them all at once, so toggling never
+    /// touches the buffer content and the scroll position doesn't move. Copying
+    /// excludes invisible text, so a hidden timestamp doesn't leak into the
+    /// clipboard.
     ts_tag: gtk::TextTag,
-    /// Every line still in view, oldest first. Source of truth for re-rendering.
-    lines: VecDeque<LogLine>,
     /// A chunk that didn't end on a newline, awaiting the rest of its line.
     pending: String,
     /// The scroll position, watched for follow. `Option` only because it's
@@ -152,22 +141,31 @@ impl Component for LogsPage {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let view = gtk::TextView::new();
-        // Build the timestamp tag directly (rather than `create_tag`, which
-        // returns an Option we'd have to unwrap) and register it.
+        // Timestamps start hidden (off by default). Colour is set on realize
+        // from the theme, below.
         let ts_tag = gtk::TextTag::builder()
             .name("timestamp")
-            .foreground(TIMESTAMP_COLOR)
+            .invisible(true)
             .build();
         view.buffer().tag_table().add(&ts_tag);
+
+        // Dim the timestamp relative to the *theme's* text colour, so it reads
+        // right in both light and dark. `WidgetExt::color` only resolves once the
+        // view is realized, so apply then; the page is rebuilt on every open, so
+        // this also re-runs whenever the theme has since changed.
+        let tag = ts_tag.clone();
+        view.connect_realize(move |view| {
+            let fg = view.color();
+            let dim = gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), fg.alpha() * TIMESTAMP_DIM);
+            tag.set_foreground_rgba(Some(&dim));
+        });
 
         let mut model = LogsPage {
             title: init.title,
             wrap: true,
-            timestamps: false,
             follow: true,
             view: view.clone(),
             ts_tag,
-            lines: VecDeque::new(),
             pending: String::new(),
             vadj: None,
         };
@@ -219,8 +217,9 @@ impl Component for LogsPage {
             LogsInput::SetWrap(wrap) => self.wrap = wrap,
 
             LogsInput::SetTimestamps(show) => {
-                self.timestamps = show;
-                self.rebuild();
+                // Just flip the tag's visibility — the timestamps are already in
+                // the buffer. No rebuild, so the scroll position is untouched.
+                self.ts_tag.set_invisible(!show);
             }
 
             LogsInput::ScrolledManually => {
@@ -255,42 +254,29 @@ impl Component for LogsPage {
             LogsCmd::Chunk(text) => self.feed(&text),
             LogsCmd::Failed(reason) => {
                 self.flush_pending();
-                self.push_line(synthetic(&format!("— stream error: {reason} —")));
+                self.insert(None, &format!("— stream error: {reason} —"));
             }
             LogsCmd::Ended => {
                 self.flush_pending();
-                self.push_line(synthetic("— end of logs —"));
+                self.insert(None, "— end of logs —");
             }
         }
-    }
-}
-
-/// A line we generated ourselves (no timestamp).
-fn synthetic(message: &str) -> LogLine {
-    LogLine {
-        time: String::new(),
-        message: message.to_owned(),
     }
 }
 
 /// Split off Docker's leading RFC3339 timestamp, keeping only `HH:MM:SS`.
 ///
 /// A timestamped line looks like `2026-07-17T16:12:55.569805817Z the message`.
-/// If it doesn't parse (a synthetic line, or timestamps somehow absent), the
-/// whole thing is the message with no time.
-fn parse_line(raw: &str) -> LogLine {
+/// The returned `&str` borrows the message. If it doesn't parse (a synthetic
+/// line, or timestamps somehow absent), there's no time and the whole thing is
+/// the message.
+fn split_timestamp(raw: &str) -> (Option<String>, &str) {
     if let Some((stamp, message)) = raw.split_once(' ')
         && let Some(time) = hms(stamp)
     {
-        return LogLine {
-            time,
-            message: message.to_owned(),
-        };
+        return (Some(time), message);
     }
-    LogLine {
-        time: String::new(),
-        message: raw.to_owned(),
-    }
+    (None, raw)
 }
 
 /// `2026-07-17T16:12:55.569805817Z` -> `16:12:55`, or `None` if not that shape.
@@ -312,7 +298,8 @@ impl LogsPage {
         while let Some(newline) = self.pending.find('\n') {
             let line: String = self.pending.drain(..=newline).collect();
             let line = line.trim_end_matches(['\n', '\r']);
-            self.push_line(parse_line(line));
+            let (time, message) = split_timestamp(line);
+            self.insert(time.as_deref(), message);
         }
     }
 
@@ -320,49 +307,31 @@ impl LogsPage {
     fn flush_pending(&mut self) {
         if !self.pending.is_empty() {
             let line = std::mem::take(&mut self.pending);
-            self.push_line(parse_line(&line));
+            let (time, message) = split_timestamp(&line);
+            self.insert(time.as_deref(), message);
         }
     }
 
-    /// Record a line and render it, dropping the oldest if over the cap.
-    fn push_line(&mut self, line: LogLine) {
-        self.render(&line);
-        self.lines.push_back(line);
-        while self.lines.len() > MAX_LINES {
-            self.lines.pop_front();
-            self.delete_first_line();
-        }
-    }
-
-    /// Append one line's text to the buffer, dimming the timestamp if shown.
-    fn render(&self, line: &LogLine) {
+    /// Append one entry: the timestamp (always tagged, hidden unless toggled on),
+    /// then the message, then a newline. Trims the oldest lines past the cap.
+    fn insert(&self, time: Option<&str>, message: &str) {
         let buffer = self.view.buffer();
-        if self.timestamps && !line.time.is_empty() {
+
+        if let Some(time) = time {
             let mut end = buffer.end_iter();
-            buffer.insert_with_tags(&mut end, &format!("{}  ", line.time), &[&self.ts_tag]);
+            buffer.insert_with_tags(&mut end, &format!("{time}  "), &[&self.ts_tag]);
         }
         let mut end = buffer.end_iter();
-        buffer.insert(&mut end, &line.message);
+        buffer.insert(&mut end, message);
         let mut end = buffer.end_iter();
         buffer.insert(&mut end, "\n");
-    }
 
-    /// Delete the oldest line from the buffer (start up to the second line).
-    fn delete_first_line(&self) {
-        let buffer = self.view.buffer();
-        if let Some(mut second) = buffer.iter_at_line(1) {
+        let excess = buffer.line_count() - MAX_LINES;
+        if excess > 0
+            && let Some(mut cut) = buffer.iter_at_line(excess)
+        {
             let mut start = buffer.start_iter();
-            buffer.delete(&mut start, &mut second);
-        }
-    }
-
-    /// Re-render the whole buffer from `lines` — used when the timestamp toggle
-    /// flips, since that changes every line.
-    fn rebuild(&self) {
-        let buffer = self.view.buffer();
-        buffer.set_text("");
-        for line in &self.lines {
-            self.render(line);
+            buffer.delete(&mut start, &mut cut);
         }
     }
 }
@@ -373,30 +342,31 @@ mod tests {
 
     #[test]
     fn strips_the_docker_timestamp_to_hms() {
-        let line = parse_line("2026-07-17T16:12:55.569805817Z checkpoint starting");
-        assert_eq!(line.time, "16:12:55");
-        assert_eq!(line.message, "checkpoint starting");
+        let (time, message) = split_timestamp("2026-07-17T16:12:55.569805817Z checkpoint starting");
+        assert_eq!(time.as_deref(), Some("16:12:55"));
+        assert_eq!(message, "checkpoint starting");
     }
 
     #[test]
     fn a_line_without_a_timestamp_is_all_message() {
-        let line = parse_line("— end of logs —");
-        assert!(line.time.is_empty());
-        assert_eq!(line.message, "— end of logs —");
+        let (time, message) = split_timestamp("— end of logs —");
+        assert!(time.is_none());
+        assert_eq!(message, "— end of logs —");
     }
 
     #[test]
     fn keeps_the_apps_own_timestamp_in_the_message() {
         // Docker's stamp is stripped; postgres's own stays part of the message.
-        let line = parse_line("2026-07-17T16:12:55.5Z 2026-07-17 16:12:55 UTC [27] LOG: hi");
-        assert_eq!(line.time, "16:12:55");
-        assert_eq!(line.message, "2026-07-17 16:12:55 UTC [27] LOG: hi");
+        let (time, message) =
+            split_timestamp("2026-07-17T16:12:55.5Z 2026-07-17 16:12:55 UTC [27] LOG: hi");
+        assert_eq!(time.as_deref(), Some("16:12:55"));
+        assert_eq!(message, "2026-07-17 16:12:55 UTC [27] LOG: hi");
     }
 
     #[test]
     fn rejects_a_leading_token_that_isnt_a_timestamp() {
-        let line = parse_line("hello world");
-        assert!(line.time.is_empty());
-        assert_eq!(line.message, "hello world");
+        let (time, message) = split_timestamp("hello world");
+        assert!(time.is_none());
+        assert_eq!(message, "hello world");
     }
 }
