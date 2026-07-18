@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Our own container types.
 //!
 //! bollard's generated models stop here and never reach the UI (CLAUDE.md

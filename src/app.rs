@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Root component.
 //!
 //! This is Redux with a compiler: `AppMsg` are the actions, `update` is the sole

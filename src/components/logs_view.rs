@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The streaming log view — an embeddable panel (a `Box`), placed inside the
 //! container detail page.
 //!

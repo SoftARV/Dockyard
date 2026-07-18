@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! The container detail view — a page pushed onto the `NavigationView` when a
 //! row is clicked. Dashboard cards for status, uptime, CPU and memory, plus
 //! details, ports, and an embedded live log panel.
