@@ -11,9 +11,10 @@
 use std::collections::HashSet;
 
 use bollard::Docker;
+use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
-use relm4::gtk::glib;
+use relm4::gtk::{gio, glib};
 use relm4::{
     Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmWidgetExt,
     adw, gtk,
@@ -28,6 +29,15 @@ use crate::docker::client;
 use crate::docker::types::Container;
 
 const POLL_INTERVAL_SECS: u32 = 2;
+
+// The primary menu's action group. GTK menu items invoke `GAction`s by name;
+// this defines the "win" group and a stateless "about" action in it (fully
+// qualified: `win.about`). The group is registered on the window in `init`,
+// where the callback bridges the action to an `AppMsg`.
+relm4::new_action_group!(AppMenuActionGroup, "win");
+relm4::new_stateless_action!(RefreshAction, AppMenuActionGroup, "refresh");
+relm4::new_stateless_action!(AboutAction, AppMenuActionGroup, "about");
+relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -66,6 +76,11 @@ pub struct AppModel {
     /// standard relm4 escape hatch for widgets that are commanded rather than
     /// declared.
     toast_overlay: adw::ToastOverlay,
+    /// The primary menu's "Refresh" action, held so it can be greyed out until
+    /// we're connected — the same reason the old refresh button was disabled
+    /// when `docker` was `None`. A menu item's enabled state can't be `#[watch]`ed
+    /// from `view!`, so we toggle the `GAction` imperatively instead.
+    refresh_action: gio::SimpleAction,
 }
 
 #[derive(Debug)]
@@ -83,6 +98,8 @@ pub enum AppMsg {
     RemoveConfirmed(String),
     /// Open the detail page for a container.
     ShowDetails(String),
+    /// Open the About dialog (from the primary menu).
+    ShowAbout,
     /// The detail page was popped — back button, Escape, swipe. Drops its
     /// controller, which stops the streams it owns (stats and logs).
     PageClosed,
@@ -250,20 +267,22 @@ impl Component for AppModel {
 
                         adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
-                                pack_end = &gtk::Button {
-                                    set_icon_name: "view-refresh-symbolic",
-                                    set_tooltip_text: Some("Refresh"),
-                                    #[watch]
-                                    set_visible: !model.refreshing,
-                                    #[watch]
-                                    set_sensitive: model.docker.is_some(),
-                                    connect_clicked => AppMsg::ManualRefresh,
+                                // The primary menu — the GNOME hamburger. It's a
+                                // real menu model (a `gio::Menu`), not a hand-built
+                                // popover, so its items invoke `GAction`s and get
+                                // keyboard/screen-reader behaviour for free. Packed
+                                // first so it sits at the far right.
+                                pack_end = &gtk::MenuButton {
+                                    set_icon_name: "open-menu-symbolic",
+                                    set_tooltip_text: Some("Main Menu"),
+                                    set_menu_model: Some(&primary_menu),
                                 },
 
-                                // Only ever shown for a refresh the user asked
-                                // for. A local list call takes ~2ms so this
-                                // usually isn't seen — it earns its place when
-                                // the daemon is slow.
+                                // Refresh moved into the primary menu (with a
+                                // Ctrl+R / F5 accelerator); this spinner is the
+                                // header's remaining refresh feedback. A local
+                                // list takes ~2ms so it's usually unseen — it
+                                // earns its place when the daemon is slow.
                                 pack_end = &gtk::Spinner {
                                     #[watch]
                                     set_visible: model.refreshing,
@@ -332,6 +351,21 @@ impl Component for AppModel {
         }
     }
 
+    // The primary menu's model. Sibling of `view!` (the component macro wires
+    // `primary_menu` into the tree above). Each item names a `GAction`, resolved
+    // against the "win" group we register on the window in `init`.
+    menu! {
+        primary_menu: {
+            section! {
+                "Refresh" => RefreshAction,
+            },
+            section! {
+                "About Dockyard" => AboutAction,
+                "Quit" => QuitAction,
+            }
+        }
+    }
+
     fn init(
         _init: Self::Init,
         root: Self::Root,
@@ -348,6 +382,16 @@ impl Component for AppModel {
                 ContainerRowOutput::ShowDetails(id) => AppMsg::ShowDetails(id),
             });
 
+        // Build the Refresh action up front so its `GAction` handle can live in
+        // the model (to grey it out until connected). It's a thin bridge to
+        // `ManualRefresh`, like the About action. Starts disabled; enabled in the
+        // `Connected` handler.
+        let refresh_sender = sender.input_sender().clone();
+        let refresh_action: RelmAction<RefreshAction> = RelmAction::new_stateless(move |_| {
+            refresh_sender.send(AppMsg::ManualRefresh).ok();
+        });
+        refresh_action.set_enabled(false);
+
         let model = AppModel {
             docker: None,
             containers,
@@ -358,6 +402,7 @@ impl Component for AppModel {
             nav: adw::NavigationView::new(),
             detail: None,
             toast_overlay: adw::ToastOverlay::new(),
+            refresh_action: refresh_action.gio_action().clone(),
         };
 
         let toast_overlay = model.toast_overlay.clone();
@@ -371,6 +416,32 @@ impl Component for AppModel {
         model.nav.connect_popped(move |_, _| {
             popped.send(AppMsg::PageClosed).ok();
         });
+
+        // Wire the menu's `win.about` action to a message. The action is GTK's
+        // command mechanism (menu items can only invoke actions); we keep it a
+        // thin bridge — it just posts `ShowAbout` so the dialog is built in the
+        // reducer like every other UI change. Registering the group on the window
+        // is what makes `win.about` resolve for the menu inside it.
+        let about_sender = sender.input_sender().clone();
+        let about_action: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
+            about_sender.send(AppMsg::ShowAbout).ok();
+        });
+        // Quit doesn't touch the model, so it acts directly rather than posting a
+        // message like the others — it just tells the application to quit, which
+        // closes the window.
+        let quit_action: RelmAction<QuitAction> = RelmAction::new_stateless(|_| {
+            relm4::main_application().quit();
+        });
+        let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
+        menu_actions.add_action(refresh_action);
+        menu_actions.add_action(about_action);
+        menu_actions.add_action(quit_action);
+        menu_actions.register_for_widget(&root);
+
+        // Common actions deserve shortcuts; the menu shows them automatically.
+        let app = relm4::main_application();
+        app.set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
+        app.set_accelerators_for_action::<QuitAction>(&["<primary>q"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -433,6 +504,26 @@ impl Component for AppModel {
                     }
                 });
                 dialog.present(Some(root));
+            }
+
+            AppMsg::ShowAbout => {
+                // A standard adw::AboutDialog, filled from our own metadata. The
+                // icon resolves to the installed themed icon (a generic fallback
+                // before `make install`); `license_type` renders the full GPL
+                // notice, so we don't hand-write it. `Gpl30` is GTK's name for
+                // "v3 or later" (`Gpl30Only` would be version-3-only).
+                let about = adw::AboutDialog::builder()
+                    .application_name("Dockyard")
+                    .application_icon(crate::APP_ID)
+                    .version(env!("CARGO_PKG_VERSION"))
+                    .developer_name("Miguel Rincon")
+                    .comments("Manage the Docker containers on your machine, natively.")
+                    .website("https://github.com/SoftARV/Dockyard")
+                    .issue_url("https://github.com/SoftARV/Dockyard/issues")
+                    .license_type(gtk::License::Gpl30)
+                    .copyright("© 2026 Miguel Rincon")
+                    .build();
+                about.present(Some(root));
             }
 
             AppMsg::ShowDetails(id) => {
@@ -498,6 +589,9 @@ impl Component for AppModel {
                 Ok(docker) => {
                     self.docker = Some(docker);
                     self.state = ViewState::Ready;
+                    // Now that there's a daemon to talk to, the menu's Refresh
+                    // item (and its Ctrl+R / F5 shortcut) becomes usable.
+                    self.refresh_action.set_enabled(true);
 
                     // GTK already knows whether the window is worth drawing;
                     // "suspended" covers minimised, fully obscured and
