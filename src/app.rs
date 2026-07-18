@@ -38,6 +38,9 @@ relm4::new_action_group!(AppMenuActionGroup, "win");
 relm4::new_stateless_action!(RefreshAction, AppMenuActionGroup, "refresh");
 relm4::new_stateless_action!(AboutAction, AppMenuActionGroup, "about");
 relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
+// No menu item — the header toggle button is search's visible affordance — but
+// the action still has to exist so the Ctrl+F accelerator has something to fire.
+relm4::new_stateless_action!(SearchAction, AppMenuActionGroup, "search");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -49,6 +52,14 @@ pub enum ViewState {
 pub struct AppModel {
     docker: Option<Docker>,
     containers: FactoryVecDeque<ContainerRow>,
+    /// The full, unfiltered set from the last poll. The factory only holds the
+    /// rows the search currently shows, so it can't double as the backing store;
+    /// we keep the complete list here and derive the visible rows from it.
+    all_containers: Vec<Container>,
+    /// The search text, as typed. Empty means no filter. Matching is
+    /// case-insensitive (lowercased at compare time), so this stays original-case
+    /// for display in the "no matches" page.
+    query: String,
     state: ViewState,
     /// Containers with an action in flight. The rows own the spinner, but the
     /// set lives here so a row rebuilt mid-action can be given its state back.
@@ -98,6 +109,9 @@ pub enum AppMsg {
     RemoveConfirmed(String),
     /// Open the detail page for a container.
     ShowDetails(String),
+    /// The search text changed (live, per keystroke). Re-filters the list in
+    /// place without touching Docker.
+    SearchChanged(String),
     /// Open the About dialog (from the primary menu).
     ShowAbout,
     /// The detail page was popped — back button, Escape, swipe. Drops its
@@ -242,6 +256,78 @@ impl AppModel {
                 .send(index, ContainerRowInput::SetBusy(busy));
         }
     }
+
+    /// Which `Stack` page to show: the true "no containers" empty state, the
+    /// "nothing matches your search" state, or the list itself.
+    fn list_page(&self) -> &'static str {
+        if self.all_containers.is_empty() {
+            "empty"
+        } else if self.containers.is_empty() {
+            "no-results"
+        } else {
+            "list"
+        }
+    }
+
+    /// Reconcile the visible rows from `all_containers` filtered by `query`.
+    ///
+    /// Called both when a poll delivers a fresh set and when the query changes,
+    /// so "the data changed" and "the filter changed" share one path. The filter
+    /// matches name and image, case-insensitively; order is preserved because the
+    /// client already sorts by name, which keeps the positional id-match valid.
+    fn apply_containers(&mut self) {
+        let needle = self.query.to_lowercase();
+        // An owned, filtered snapshot. The reconcile below borrows `self` mutably
+        // (`send`/`guard`), so it can't also hold a shared borrow of
+        // `self.all_containers` across the loop. Cloning the matches is the price
+        // of keeping the unfiltered list as a separate backing store — cheap at
+        // these counts, and only the matches are cloned.
+        let filtered: Vec<Container> = self
+            .all_containers
+            .iter()
+            .filter(|c| {
+                needle.is_empty()
+                    || c.name.to_lowercase().contains(&needle)
+                    || c.image.to_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect();
+
+        // Update rows in place while the visible id set is unchanged, rebuild
+        // only when it isn't. The in-place path is what lets a poll refresh
+        // status 30×/min without destroying transient widget state (an open
+        // popover is parented to a row's menu button and would slam shut on a
+        // rebuild); it also means a poll landing mid-search keeps the filtered
+        // rows live rather than flickering.
+        let unchanged_membership = self.containers.len() == filtered.len()
+            && self
+                .containers
+                .iter()
+                .zip(&filtered)
+                .all(|(row, container)| row.id() == container.id);
+
+        if unchanged_membership {
+            for (index, container) in filtered.into_iter().enumerate() {
+                self.containers
+                    .send(index, ContainerRowInput::Update(container));
+            }
+        } else {
+            debug!(
+                count = filtered.len(),
+                "visible set changed, rebuilding rows"
+            );
+            let mut guard = self.containers.guard();
+            guard.clear();
+            for container in filtered {
+                // Hand the spinner state back, or a container mid-action would
+                // stop spinning the instant the visible set changed under it.
+                guard.push_back(ContainerRowInit {
+                    busy: self.busy.contains(&container.id),
+                    container,
+                });
+            }
+        }
+    }
 }
 
 #[relm4::component(pub)]
@@ -267,6 +353,16 @@ impl Component for AppModel {
 
                         adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                // The search toggle, on the far left — opposite
+                                // the menu button. Two-way-bound in `init` to the
+                                // search bar's reveal state, so it stays lit while
+                                // search is open and pops out when it closes.
+                                #[name = "search_button"]
+                                pack_start = &gtk::ToggleButton {
+                                    set_icon_name: "system-search-symbolic",
+                                    set_tooltip_text: Some("Search"),
+                                },
+
                                 // The primary menu — the GNOME hamburger. It's a
                                 // real menu model (a `gio::Menu`), not a hand-built
                                 // popover, so its items invoke `GAction`s and get
@@ -290,6 +386,16 @@ impl Component for AppModel {
                                     set_spinning: model.refreshing,
                                     set_valign: gtk::Align::Center,
                                 },
+                            },
+
+                            // The search bar, a second top bar just under the
+                            // header — it reveals with the usual GNOME slide. Its
+                            // entry is built and set as the child in `init` (so its
+                            // `search-changed` signal can reach a message), leaving
+                            // this a bare, named shell.
+                            #[name = "search_bar"]
+                            add_top_bar = &gtk::SearchBar {
+                                set_show_close_button: true,
                             },
 
                             #[wrap(Some)]
@@ -334,14 +440,22 @@ impl Component for AppModel {
                                         ),
                                     },
 
+                                    // Distinct from "empty": containers exist, the
+                                    // search just excluded all of them.
+                                    add_named[Some("no-results")] = &adw::StatusPage {
+                                        set_icon_name: Some("system-search-symbolic"),
+                                        set_title: "No Matches",
+                                        #[watch]
+                                        set_description: Some(&format!(
+                                            "No containers match “{}”.",
+                                            model.query,
+                                        )),
+                                    },
+
                                     // Set after the children exist — naming a
                                     // missing child is a GTK-CRITICAL.
                                     #[watch]
-                                    set_visible_child_name: if model.containers.is_empty() {
-                                        "empty"
-                                    } else {
-                                        "list"
-                                    },
+                                    set_visible_child_name: model.list_page(),
                                 },
                             },
                         },
@@ -395,6 +509,8 @@ impl Component for AppModel {
         let model = AppModel {
             docker: None,
             containers,
+            all_containers: Vec::new(),
+            query: String::new(),
             state: ViewState::Loading,
             busy: HashSet::new(),
             refreshing: false,
@@ -408,6 +524,19 @@ impl Component for AppModel {
         let toast_overlay = model.toast_overlay.clone();
         let nav = model.nav.clone();
         let container_group = model.containers.widget();
+
+        // Built here, not in `view!`, so its `search-changed` signal can be wired
+        // to a message and so `init` can hand the same handle both to the search
+        // bar (as its child, below) and to the clear-on-close closure.
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_hexpand(true);
+        let search_sender = sender.input_sender().clone();
+        search_entry.connect_search_changed(move |entry| {
+            search_sender
+                .send(AppMsg::SearchChanged(entry.text().to_string()))
+                .ok();
+        });
+
         let widgets = view_output!();
 
         // A pop means the user left the detail page (the only thing we push), so
@@ -416,6 +545,39 @@ impl Component for AppModel {
         model.nav.connect_popped(move |_, _| {
             popped.send(AppMsg::PageClosed).ok();
         });
+
+        // Search bar wiring, here rather than in `view!` because it needs the
+        // built widgets: the entry becomes the bar's child, the bar captures
+        // keystrokes from the whole window (type anywhere to start searching — the
+        // GNOME idiom), and the header toggle is bound to the bar's reveal state.
+        widgets.search_bar.set_child(Some(&search_entry));
+        widgets.search_bar.connect_entry(&search_entry);
+        widgets.search_bar.set_key_capture_widget(Some(&root));
+
+        // A bidirectional GObject property binding — the two-way data binding of
+        // the GTK world. Flip the toggle and the bar reveals; press Escape or the
+        // bar's close button and the toggle pops back out. Because the widgets are
+        // the source of truth for their own reveal state, the model needs no
+        // "is search open" flag.
+        widgets
+            .search_button
+            .bind_property("active", &widgets.search_bar, "search-mode-enabled")
+            .bidirectional()
+            .sync_create()
+            .build();
+
+        // Closing the bar clears the query so the full list returns. Clearing the
+        // entry fires `search-changed`, which routes through `SearchChanged("")` —
+        // the one and only "the query changed" path, so there's nothing to keep in
+        // sync by hand.
+        let clear_entry = search_entry.clone();
+        widgets
+            .search_bar
+            .connect_search_mode_enabled_notify(move |bar| {
+                if !bar.is_search_mode() {
+                    clear_entry.set_text("");
+                }
+            });
 
         // Wire the menu's `win.about` action to a message. The action is GTK's
         // command mechanism (menu items can only invoke actions); we keep it a
@@ -432,16 +594,26 @@ impl Component for AppModel {
         let quit_action: RelmAction<QuitAction> = RelmAction::new_stateless(|_| {
             relm4::main_application().quit();
         });
+        // Ctrl+F toggles search. It just flips the header toggle; the binding
+        // above turns that into revealing or hiding the bar. Cloning the button
+        // into the closure holds a strong ref, but both live as long as the
+        // window, so there's nothing to leak.
+        let search_button = widgets.search_button.clone();
+        let search_action: RelmAction<SearchAction> = RelmAction::new_stateless(move |_| {
+            search_button.set_active(!search_button.is_active());
+        });
         let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
         menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
         menu_actions.add_action(quit_action);
+        menu_actions.add_action(search_action);
         menu_actions.register_for_widget(&root);
 
         // Common actions deserve shortcuts; the menu shows them automatically.
         let app = relm4::main_application();
         app.set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
         app.set_accelerators_for_action::<QuitAction>(&["<primary>q"]);
+        app.set_accelerators_for_action::<SearchAction>(&["<primary>f"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -571,6 +743,11 @@ impl Component for AppModel {
                 }
             }
 
+            AppMsg::SearchChanged(query) => {
+                self.query = query;
+                self.apply_containers();
+            }
+
             AppMsg::Error(message) => {
                 tracing::error!(%message);
                 self.toast(&message);
@@ -615,46 +792,12 @@ impl Component for AppModel {
             },
 
             CommandMsg::ContainersLoaded(containers) => {
-                // The poll fires every 2s, so what happens here happens 30 times
-                // a minute. Rebuilding the rows would destroy and recreate every
-                // widget each time, which throws away transient UI state — an
-                // open popover is parented to a row's menu button, so it would
-                // slam shut on the next tick.
-                //
-                // Containers are sorted by name, so in the steady state the ids
-                // line up positionally and we can update each row in place.
-                let unchanged_membership = self.containers.len() == containers.len()
-                    && self
-                        .containers
-                        .iter()
-                        .zip(&containers)
-                        .all(|(row, container)| row.id() == container.id);
-
-                if unchanged_membership {
-                    for (index, container) in containers.into_iter().enumerate() {
-                        self.containers
-                            .send(index, ContainerRowInput::Update(container));
-                    }
-                } else {
-                    // A container appeared or disappeared. Rebuilding is fine
-                    // here: it's rare, and the row set genuinely changed.
-                    debug!(
-                        count = containers.len(),
-                        "container set changed, rebuilding rows"
-                    );
-                    let mut guard = self.containers.guard();
-                    guard.clear();
-                    for container in containers {
-                        // Hand the spinner state back, or a container being
-                        // removed would stop spinning the instant some *other*
-                        // container happened to appear.
-                        guard.push_back(ContainerRowInit {
-                            busy: self.busy.contains(&container.id),
-                            container,
-                        });
-                    }
-                }
-
+                // Store the full set, then let `apply_containers` filter it by the
+                // current query and reconcile the rows. The poll fires every 2s,
+                // so this runs 30×/min; the in-place reconcile inside
+                // `apply_containers` is what keeps that from thrashing widgets.
+                self.all_containers = containers;
+                self.apply_containers();
                 self.refreshing = false;
             }
 
