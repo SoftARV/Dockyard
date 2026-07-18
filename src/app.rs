@@ -34,6 +34,7 @@ const POLL_INTERVAL_SECS: u32 = 2;
 relm4::new_action_group!(AppMenuActionGroup, "win");
 relm4::new_stateless_action!(RefreshAction, AppMenuActionGroup, "refresh");
 relm4::new_stateless_action!(AboutAction, AppMenuActionGroup, "about");
+relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -357,6 +358,7 @@ impl Component for AppModel {
             },
             section! {
                 "About Dockyard" => AboutAction,
+                "Quit" => QuitAction,
             }
         }
     }
@@ -421,14 +423,22 @@ impl Component for AppModel {
         let about_action: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
             about_sender.send(AppMsg::ShowAbout).ok();
         });
+        // Quit doesn't touch the model, so it acts directly rather than posting a
+        // message like the others — it just tells the application to quit, which
+        // closes the window.
+        let quit_action: RelmAction<QuitAction> = RelmAction::new_stateless(|_| {
+            relm4::main_application().quit();
+        });
         let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
         menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
+        menu_actions.add_action(quit_action);
         menu_actions.register_for_widget(&root);
 
-        // A common action deserves a shortcut; the menu shows it automatically.
-        relm4::main_application()
-            .set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
+        // Common actions deserve shortcuts; the menu shows them automatically.
+        let app = relm4::main_application();
+        app.set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
+        app.set_accelerators_for_action::<QuitAction>(&["<primary>q"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
