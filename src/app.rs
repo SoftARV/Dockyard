@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use bollard::Docker;
+use relm4::actions::{RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
 use relm4::gtk::glib;
@@ -25,6 +26,13 @@ use crate::docker::client;
 use crate::docker::types::Container;
 
 const POLL_INTERVAL_SECS: u32 = 2;
+
+// The primary menu's action group. GTK menu items invoke `GAction`s by name;
+// this defines the "win" group and a stateless "about" action in it (fully
+// qualified: `win.about`). The group is registered on the window in `init`,
+// where the callback bridges the action to an `AppMsg`.
+relm4::new_action_group!(AppMenuActionGroup, "win");
+relm4::new_stateless_action!(AboutAction, AppMenuActionGroup, "about");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -80,6 +88,8 @@ pub enum AppMsg {
     RemoveConfirmed(String),
     /// Open the detail page for a container.
     ShowDetails(String),
+    /// Open the About dialog (from the primary menu).
+    ShowAbout,
     /// The detail page was popped — back button, Escape, swipe. Drops its
     /// controller, which stops the streams it owns (stats and logs).
     PageClosed,
@@ -247,6 +257,17 @@ impl Component for AppModel {
 
                         adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                // The primary menu — the GNOME hamburger. It's a
+                                // real menu model (a `gio::Menu`), not a hand-built
+                                // popover, so its items invoke `GAction`s and get
+                                // keyboard/screen-reader behaviour for free. Packed
+                                // first so it sits at the far right.
+                                pack_end = &gtk::MenuButton {
+                                    set_icon_name: "open-menu-symbolic",
+                                    set_tooltip_text: Some("Main Menu"),
+                                    set_menu_model: Some(&primary_menu),
+                                },
+
                                 pack_end = &gtk::Button {
                                     set_icon_name: "view-refresh-symbolic",
                                     set_tooltip_text: Some("Refresh"),
@@ -329,6 +350,15 @@ impl Component for AppModel {
         }
     }
 
+    // The primary menu's model. Sibling of `view!` (the component macro wires
+    // `primary_menu` into the tree above). Each item names a `GAction`, resolved
+    // against the "win" group we register on the window in `init`.
+    menu! {
+        primary_menu: {
+            "About Dockyard" => AboutAction,
+        }
+    }
+
     fn init(
         _init: Self::Init,
         root: Self::Root,
@@ -368,6 +398,19 @@ impl Component for AppModel {
         model.nav.connect_popped(move |_, _| {
             popped.send(AppMsg::PageClosed).ok();
         });
+
+        // Wire the menu's `win.about` action to a message. The action is GTK's
+        // command mechanism (menu items can only invoke actions); we keep it a
+        // thin bridge — it just posts `ShowAbout` so the dialog is built in the
+        // reducer like every other UI change. Registering the group on the window
+        // is what makes `win.about` resolve for the menu inside it.
+        let about_sender = sender.input_sender().clone();
+        let about_action: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
+            about_sender.send(AppMsg::ShowAbout).ok();
+        });
+        let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
+        menu_actions.add_action(about_action);
+        menu_actions.register_for_widget(&root);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -430,6 +473,26 @@ impl Component for AppModel {
                     }
                 });
                 dialog.present(Some(root));
+            }
+
+            AppMsg::ShowAbout => {
+                // A standard adw::AboutDialog, filled from our own metadata. The
+                // icon resolves to the installed themed icon (a generic fallback
+                // before `make install`); `license_type` renders the full GPL
+                // notice, so we don't hand-write it. `Gpl30` is GTK's name for
+                // "v3 or later" (`Gpl30Only` would be version-3-only).
+                let about = adw::AboutDialog::builder()
+                    .application_name("Dockyard")
+                    .application_icon(crate::APP_ID)
+                    .version(env!("CARGO_PKG_VERSION"))
+                    .developer_name("Miguel Rincon")
+                    .comments("Manage the Docker containers on your machine, natively.")
+                    .website("https://github.com/SoftARV/Dockyard")
+                    .issue_url("https://github.com/SoftARV/Dockyard/issues")
+                    .license_type(gtk::License::Gpl30)
+                    .copyright("© 2026 Miguel Rincon")
+                    .build();
+                about.present(Some(root));
             }
 
             AppMsg::ShowDetails(id) => {

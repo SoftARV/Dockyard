@@ -7,7 +7,7 @@ use relm4::gtk;
 use relm4::gtk::gdk;
 use tracing_subscriber::EnvFilter;
 
-const APP_ID: &str = "dev.miguelrincon.Dockyard";
+pub(crate) const APP_ID: &str = "dev.miguelrincon.Dockyard";
 
 fn main() {
     tracing_subscriber::fmt()
