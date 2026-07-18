@@ -47,19 +47,26 @@ ports, and streaming logs, in a layout that goes side-by-side as the window wide
 ## Features
 
 - **Container list** — running *and* stopped, each an Adwaita row with name,
-  image, a colour-coded status chip, and published ports. Refreshes itself every
-  two seconds.
+  image, a colour-coded status chip, and published ports; a running count sits in
+  the header. Refreshes itself every two seconds.
+- **Search** — a header search button (or Ctrl+F) filters the list live by name
+  or image, entirely client-side.
 - **Lifecycle actions** — start, stop, restart, and remove (with a confirmation
-  dialog). Each action shows inline progress and surfaces failures as toasts,
-  never a crash.
+  dialog). Each shows inline progress — the status chip turns to "Starting…" /
+  "Stopping…" while the action runs — and surfaces failures as toasts, never a
+  crash.
 - **Detail dashboard** — click a container for a dashboard: a status chip, live
   uptime, **CPU and memory sparklines** streamed from the Docker stats API,
   plus its image, ID, command, created time, and port mappings. The layout is
   responsive — cards reflow from 2×2 to a single row, and the details sit beside
   the logs, as the window widens.
 - **Streaming logs** — follow a container's output live, embedded right in the
-  detail view, with a wrap toggle and an optional timestamp column. Follows the
-  tail as new lines arrive, but doesn't yank the view while you scroll back.
+  detail view in a fixed-dark terminal panel, with a wrap toggle and an optional
+  timestamp column. Follows the tail as new lines arrive, but doesn't yank the
+  view while you scroll back.
+- **Preferences** — a settings dialog to pick the app theme (follow system /
+  light / dark) and the default wrap and timestamp options for new log panels,
+  saved to a small config file so they persist.
 - **Native and adaptive** — libadwaita throughout, so light/dark mode, the
   system accent colour, and adaptive layout all come for free.
 - **Light on resources** — the two-second poll pauses entirely while the window
@@ -123,25 +130,28 @@ our own at the boundary so the UI never touches them.
 
 ```
 src/
-  main.rs              RelmApp bootstrap, tracing, icon, the one custom stylesheet
-  app.rs               root component: the store, reducer, and view
+  main.rs              RelmApp bootstrap, tracing, icon; loads settings + applies the theme
+  app.rs               root component: the store, reducer, and view; search + Preferences
+  settings.rs          persistent settings (a small config file) + the theme choice
   docker/
     client.rs          socket discovery, connect, ping, thin async API wrappers
     types.rs           our Container / ContainerState / Port / ContainerDetail / Stats
   components/
     container_row.rs      a container as an adw::ActionRow
     container_detail.rs   the responsive detail dashboard (embeds the log view)
-    logs_view.rs          the streaming log panel
-    status_chip.rs        state → chip label + colour variant
+    logs_view.rs          the streaming log panel (fixed-dark terminal)
+    sparkline.rs          one live CPU/memory sparkline
+    status_chip.rs        the shared status pill (label, colour, dot)
 ```
 
 ## Status
 
 **v1 is complete** — listing, lifecycle actions, the detail dashboard with live
 graphs, and embedded streaming logs are all built and in daily-driver shape.
-Minor additions are queued for a **v1.1**. The scope stays deliberately lean:
-features get added when they're genuinely useful on one machine, not to chase
-parity with Docker Desktop.
+Since then a run of refinements has landed: list **search**, a **Preferences**
+dialog (app theme and log defaults), transitional start/stop feedback, and a
+shared status chip. The scope stays deliberately lean: features get added when
+they're genuinely useful on one machine, not to chase parity with Docker Desktop.
 
 ## License
 
