@@ -830,25 +830,45 @@ impl Component for AppModel {
                 logs.add(&ts_row);
 
                 let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
-                let theme_row = adw::ComboRow::builder().title("Theme").build();
-                // A plain string dropdown: Follow system / Light / Dark, indexed
-                // by `Theme::as_index`.
-                theme_row.set_model(Some(&gtk::StringList::new(&[
-                    "Follow system",
-                    "Light",
-                    "Dark",
-                ])));
-                theme_row.set_selected(self.settings.theme.as_index());
-                let theme_sender = sender.input_sender().clone();
-                theme_row.connect_selected_notify(move |row| {
-                    theme_sender
-                        .send(AppMsg::SetTheme(Theme::from_index(row.selected())))
-                        .ok();
-                });
+                let theme_row = adw::ActionRow::builder().title("Theme").build();
+
+                // A segmented control: three linked toggle buttons acting as
+                // radios (System / Light / Dark), matched to `Theme` by index.
+                let segmented = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                segmented.add_css_class("linked");
+                segmented.set_valign(gtk::Align::Center);
+
+                let buttons: Vec<gtk::ToggleButton> = ["System", "Light", "Dark"]
+                    .iter()
+                    .map(|&label| gtk::ToggleButton::with_label(label))
+                    .collect();
+                // Link them into one radio group, so exactly one stays active.
+                for button in &buttons[1..] {
+                    button.set_group(Some(&buttons[0]));
+                }
+                // Seed the current choice *before* connecting, so setting it
+                // doesn't fire the handler and spuriously re-save.
+                buttons[self.settings.theme.as_index() as usize].set_active(true);
+                for (index, button) in buttons.iter().enumerate() {
+                    let theme_sender = sender.input_sender().clone();
+                    button.connect_toggled(move |button| {
+                        // A radio toggle fires for both the newly-on and the
+                        // now-off button; only act on the one turning on.
+                        if button.is_active() {
+                            theme_sender
+                                .send(AppMsg::SetTheme(Theme::from_index(index as u32)))
+                                .ok();
+                        }
+                    });
+                    segmented.append(button);
+                }
+
+                theme_row.add_suffix(&segmented);
                 appearance.add(&theme_row);
 
-                page.add(&logs);
+                // Appearance first — it's the most prominent, app-wide setting.
                 page.add(&appearance);
+                page.add(&logs);
                 dialog.add(&page);
                 dialog.present(Some(root));
             }

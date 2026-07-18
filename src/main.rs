@@ -25,9 +25,9 @@ fn main() {
     // rather than a `gtk::Application`. So there's deliberately no adw init here.
     let app = RelmApp::new(APP_ID);
     setup_icon();
-    // The chip's stylesheet lives with the chip; install it once now that GTK is
-    // up. It's the app's only custom CSS.
+    // Each component that needs custom CSS installs its own once GTK is up.
     components::status_chip::install_css();
+    components::logs_view::install_css();
 
     // Load persisted settings and apply the theme before the window is shown, so
     // there's no flash of the wrong colour scheme. The model owns them from here

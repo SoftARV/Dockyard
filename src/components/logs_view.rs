@@ -29,9 +29,34 @@ const MAX_LINES: i32 = 5000;
 /// one entry, distinct from the next.
 const ENTRY_SPACING: i32 = 6;
 
-/// How much to dim the timestamp relative to the theme's text colour — the same
+/// How much to dim the timestamp relative to the view's text colour — the same
 /// ~55% opacity libadwaita's `.dim-label` uses.
 const TIMESTAMP_DIM: f32 = 0.55;
+
+/// Install the log view's stylesheet: a fixed dark "terminal" look. Global (like
+/// the status chip's) and installed once at startup, because it has to style the
+/// `TextView`'s inner nodes — a per-widget `inline_css` can't reach those. The
+/// colours are deliberately fixed rather than theme-derived, so logs read like a
+/// console whether the app is in light or dark mode.
+pub fn install_css() {
+    relm4::set_global_css(CSS);
+}
+
+/* The colours must be named on the `textview` node itself, not just the outer
+class. GtkTextView takes its text colour from that node, and the theme sets it
+there explicitly (`.view`); a colour inherited from the ScrolledWindow loses to
+that explicit rule, which is why light mode gave black-on-dark. Naming
+`textview` (and its `text` child) pins the colour at the app provider's
+priority, which does beat the theme. `color` on the outer node too, so
+`WidgetExt::color` (used to tint the timestamps) still resolves to it. */
+const CSS: &str = "
+.log-terminal,
+.log-terminal textview,
+.log-terminal textview text {
+    background-color: #1e1e1e;
+    color: #e6e6e6;
+}
+";
 
 pub struct LogsInit {
     pub docker: Docker,
@@ -155,6 +180,9 @@ impl Component for LogsView {
                 set_vexpand: true,
                 set_min_content_height: 240,
                 add_css_class: "card",
+                // Fixed dark "terminal" colours, independent of the app theme —
+                // see `install_css`.
+                add_css_class: "log-terminal",
                 // Clip to the card's rounded border. Without this the TextView
                 // paints its background out to the square corners, poking past
                 // the `.card` radius; `Hidden` rounds the content to match the
