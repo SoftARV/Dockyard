@@ -148,6 +148,11 @@ impl Component for LogsView {
                 set_vexpand: true,
                 set_min_content_height: 240,
                 add_css_class: "card",
+                // Clip to the card's rounded border. Without this the TextView
+                // paints its background out to the square corners, poking past
+                // the `.card` radius; `Hidden` rounds the content to match the
+                // detail cards.
+                set_overflow: gtk::Overflow::Hidden,
 
                 #[local_ref]
                 view -> gtk::TextView {
