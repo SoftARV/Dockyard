@@ -293,16 +293,23 @@ impl Component for ContainerDetailPage {
                                     },
                                 },
 
-                                // Info (details + ports) beside the logs. Starts
-                                // stacked (vertical); the breakpoint flips it to
-                                // horizontal so info sits left of the logs.
+                                // Info (details + ports) and the logs. A grid so
+                                // the two can split by a fixed ratio when wide.
+                                // Narrow default: both at column 0, stacked in
+                                // rows 0 and 1 (one column → full width). The
+                                // breakpoint moves the logs up beside the info and
+                                // spans the columns 2:3, i.e. a 40/60 split, using
+                                // `column-homogeneous` equal columns. `hexpand` on
+                                // the children makes the columns fill the width.
                                 #[name = "body"]
-                                gtk::Box {
-                                    set_orientation: gtk::Orientation::Vertical,
-                                    set_spacing: 18,
+                                gtk::Grid {
+                                    set_column_spacing: 18,
+                                    set_row_spacing: 18,
+                                    set_column_homogeneous: true,
                                     set_vexpand: true,
 
-                                    gtk::Box {
+                                    #[name = "info"]
+                                    attach[0, 0, 1, 1] = &gtk::Box {
                                         set_orientation: gtk::Orientation::Vertical,
                                         set_spacing: 18,
                                         set_hexpand: true,
@@ -342,9 +349,8 @@ impl Component for ContainerDetailPage {
                                             },
                                         },
                                     },
-
-                                    // The embedded log panel's root widget.
-                                    append: model.logs.widget(),
+                                    // The logs are attached at (0, 1) in `init`,
+                                    // since it's an existing controller widget.
                                 },
                             },
                         },
@@ -385,16 +391,19 @@ impl Component for ContainerDetailPage {
         let mem_area = model.mem_draw.drawing_area();
         let widgets = view_output!();
 
-        // Let the log panel share horizontal space when it sits beside the info
-        // column; harmless (just fills width) while stacked.
+        // Attach the logs panel below the info column (row 1) — the stacked
+        // default. It's an existing controller widget, so it's attached here
+        // rather than in the `view!` grid. `hexpand` makes the equal grid columns
+        // fill the width; the panel's own root already vexpands, which lets its
+        // row take the remaining height.
+        widgets.body.attach(model.logs.widget(), 0, 1, 1, 1);
         model.logs.widget().set_hexpand(true);
 
-        // Responsive layout. At ≥720px: the four cards form one row (4 per line)
-        // and the info/logs body switches from stacked to side-by-side. A
-        // `Breakpoint` records the original values and restores them below the
-        // threshold, so there's nothing to undo by hand. Parse can't really fail
-        // on a constant, but rule 5 forbids `unwrap`: on the impossible error we
-        // just skip the setters and keep the stacked layout.
+        // Responsive layout. At ≥720px the four cards form one row and the
+        // info/logs grid goes side-by-side. A `Breakpoint` records the original
+        // values and restores them below the threshold, so the narrow stack needs
+        // no undoing. Parse can't really fail on a constant, but rule 5 forbids
+        // `unwrap`: on the impossible error we just keep the stacked layout.
         if let Ok(condition) = adw::BreakpointCondition::parse(WIDE_BREAKPOINT) {
             let breakpoint = adw::Breakpoint::new(condition);
             breakpoint.add_setter(
@@ -407,17 +416,22 @@ impl Component for ContainerDetailPage {
                 "max-children-per-line",
                 Some(&4u32.to_value()),
             );
-            breakpoint.add_setter(
-                &widgets.body,
-                "orientation",
-                Some(&gtk::Orientation::Horizontal.to_value()),
-            );
-            // Split the row 50/50. Without this the info column's widest row —
-            // the 64-char container ID — inflates its natural width and starves
-            // the logs. Homogeneous only makes sense side-by-side, so it rides
-            // the breakpoint too and is restored (to false) when stacked, where
-            // equal *heights* would be wrong.
-            breakpoint.add_setter(&widgets.body, "homogeneous", Some(&true.to_value()));
+
+            // The 40/60 split lives on the grid's layout children. Side-by-side,
+            // info spans 2 of the 5 equal columns (40%) and the logs move up to
+            // row 0 spanning the other 3 (60%). Restored to the stacked
+            // single-column positions when the breakpoint lifts. Setting these
+            // by property (rather than `set_column_span` etc.) is what lets the
+            // breakpoint capture and later restore the originals.
+            if let Some(grid) = widgets.body.layout_manager() {
+                let info_lc = grid.layout_child(&widgets.info);
+                let logs_lc = grid.layout_child(model.logs.widget());
+                breakpoint.add_setter(&info_lc, "column-span", Some(&2i32.to_value()));
+                breakpoint.add_setter(&logs_lc, "column", Some(&2i32.to_value()));
+                breakpoint.add_setter(&logs_lc, "row", Some(&0i32.to_value()));
+                breakpoint.add_setter(&logs_lc, "column-span", Some(&3i32.to_value()));
+            }
+
             widgets.breakpoint_bin.add_breakpoint(breakpoint);
         }
 
