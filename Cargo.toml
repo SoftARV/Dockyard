@@ -11,11 +11,15 @@ readme = "README.md"
 anyhow = "1"
 bollard = "0.21"
 futures-util = "0.3"
-# `gnome_46` == libadwaita 1.5, needed for adw::AlertDialog. (1.4 would cover
-# adw::ToolbarView and adw::NavigationView.) This is the libadwaita version
-# users need installed, so raising it drops older distros; 1.5 ships in
-# GNOME 46 (Mar 2024) and Ubuntu 24.04 LTS.
-relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
+# `gnome_49` == libadwaita 1.8 (and GTK 4.20). We need 1.8 for
+# adw::ShortcutsDialog, the non-deprecated replacement for GtkShortcutsWindow
+# (deprecated since GTK 4.18); 1.5 already gave us adw::AlertDialog. This is the
+# libadwaita version users must have installed, so raising it drops older
+# distros — 1.8 ships in GNOME 49 (Sep 2025). Fine here: this is a personal,
+# single-machine app and that machine is on a newer libadwaita already. No
+# dependency versions change with this bump — relm4/gtk4/libadwaita 0.11/0.9.2
+# already carry the gnome_49 feature; only the API surface (and floor) moves.
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_49"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

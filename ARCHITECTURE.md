@@ -44,7 +44,7 @@ that's why. Close the first window, or:
 pkill -f target/debug/dockyard
 ```
 
-Requirements: Rust ≥ 1.93, gtk4 ≥ 4.10, libadwaita ≥ 1.5, and a reachable Docker
+Requirements: Rust ≥ 1.93, gtk4 ≥ 4.20, libadwaita ≥ 1.8, and a reachable Docker
 daemon. On Arch/CachyOS:
 
 ```bash
@@ -414,10 +414,15 @@ relm4's `gnome_*` features gate which libadwaita widgets exist at all. The
 default is `gnome_42`, which doesn't have `adw::ToolbarView` or
 `adw::NavigationView` (libadwaita 1.4) — the code simply won't compile.
 
-We pin **`gnome_46`** (libadwaita 1.5), which `adw::AlertDialog` needs. This is
-a floor on what users must have installed, so it's a real cost, not just a
-number: GNOME 46 shipped Mar 2024 and is what Ubuntu 24.04 LTS carries. Raise
-it only for a widget you actually need.
+We pin **`gnome_49`** (libadwaita 1.8), which `adw::ShortcutsDialog` needs. This
+is a floor on what users must have installed, so it's a real cost, not just a
+number: GNOME 49 shipped Sep 2025. We started at `gnome_46` (for
+`adw::AlertDialog`) and raised it once, deliberately, for the shortcuts overlay
+— its predecessor `GtkShortcutsWindow` is deprecated since GTK 4.18 and can't be
+used under `clippy -D warnings` at any newer feature level. The bump changed no
+crate versions (relm4/gtk4/libadwaita already carry the `gnome_49` feature);
+only the API surface and the floor moved. Raise it only for a widget you
+actually need.
 
 The version ladder is worth internalising, because it decides what you're
 allowed to use:
@@ -426,8 +431,9 @@ allowed to use:
 | --- | --- | --- |
 | `gnome_42` (default) | 1.0 | `ActionRow`, `StatusPage`, `Toast` |
 | `gnome_45` | 1.4 | `ToolbarView`, `NavigationView` |
-| **`gnome_46`** ← us | **1.5** | **`AlertDialog`** |
+| `gnome_46` | 1.5 | `AlertDialog` |
 | `gnome_47` | 1.6 | `MessageDialog` becomes deprecated |
+| **`gnome_49`** ← us | **1.8** | **`ShortcutsDialog`** (replaces the deprecated `GtkShortcutsWindow`) |
 
 Relatedly: **relm4 0.11's docs.rs build is broken**, so the web only documents
 0.10 and some of it is wrong for us. The reliable reference is the vendored
@@ -451,7 +457,7 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 | Poll every 2s, don't use events | CLAUDE.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
 | The poll is silent; only user-initiated refresh spins | A spinner blinking every 2s forever is worse than no feedback. `AppMsg::ManualRefresh` exists purely to draw that line. |
 | Actions refresh immediately on completion | Waiting up to 2s for the next poll made even fast actions feel broken. |
-| `gnome_46` for `adw::AlertDialog` | `AlertDialog` needs libadwaita 1.5. `MessageDialog` works at 1.4 but is deprecated from 1.6, so it would break `clippy -D warnings` on any later bump. Floor is GNOME 46 (Mar 2024) = Ubuntu 24.04 LTS. |
+| `gnome_49` for `adw::ShortcutsDialog` | The keyboard-shortcuts overlay's old widget, `GtkShortcutsWindow`, is deprecated since GTK 4.18 and breaks `clippy -D warnings` at any feature level that enables the deprecation; its replacement `adw::ShortcutsDialog` needs libadwaita 1.8. (We were already on `gnome_46` for `adw::AlertDialog` — 1.5; `MessageDialog` works at 1.4 but is deprecated from 1.6.) Floor is now GNOME 49 (Sep 2025); the bump changed no crate versions. |
 | Update rows in place; rebuild only when membership changes | The first cut rebuilt every row on every poll. That destroys widgets 30 times a minute, and an open popover — parented to a row's menu button — died with it. Cheapness was never the issue; rebuilding throws away interaction state. |
 | `remove_container` isn't forced | Removing a running container should fail loudly rather than silently kill it. |
 | Sort by name | Docker returns newest-first; a list that reorders under your cursor every 2s is worse than a stable one. |
@@ -682,6 +688,27 @@ sets that node's colour explicitly (`.view`) and a colour merely *inherited* fro
 the ScrolledWindow loses to it. Background worked from the start (set on the
 `text` node) while colour didn't, which is exactly why light mode rendered
 black-on-dark until the `textview` node was named.
+
+**[#31] Keyboard-shortcuts overlay** — a **Keyboard Shortcuts** item in the
+primary menu (Ctrl+?) opens the standard GNOME shortcuts overlay, listing the
+app's accelerators grouped into *General* (Refresh, Search), *Navigation* (Go
+back — `AdwNavigationView`'s built-in Escape), and *Application* (Preferences,
+Keyboard Shortcuts, Quit). Wired like About/Preferences: a thin `win.shortcuts`
+action posts `ShowShortcuts`, and the reducer builds the dialog.
+
+The widget choice was the interesting part. The obvious `GtkShortcutsWindow` is
+**deprecated since GTK 4.18**; it still compiled clean for us only because our
+floor (`gnome_46` → `gtk4/v4_14`) didn't enable the deprecation — a fragile
+position, since the day anything raised the floor it would break
+`clippy -D warnings`. Its non-deprecated successor is **`adw::ShortcutsDialog`**
+(libadwaita 1.8, GNOME 49). Adopting it cost only a feature-flag bump
+(`gnome_46` → `gnome_49`, no crate-version changes) and is strictly nicer here:
+where `GtkShortcutsWindow` had to be assembled from an inline GtkBuilder XML blob
+(its children register through the `Buildable` interface, so `append` wouldn't
+do), `ShortcutsDialog` is built imperatively — `ShortcutsSection` +
+`ShortcutsItem` — and presents as an `adw::Dialog` like the app's other dialogs.
+The trade is the install floor: GNOME 49 (Sep 2025), fine for a personal,
+single-machine app already on a newer libadwaita.
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
