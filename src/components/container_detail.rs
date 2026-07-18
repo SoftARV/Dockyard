@@ -25,7 +25,7 @@ use relm4::{
 
 use crate::components::logs_view::{LogsInit, LogsInput, LogsView};
 use crate::components::sparkline::{Scale, Sparkline, SparklineInit, SparklineInput};
-use crate::components::status_chip;
+use crate::components::status_chip::{self, StatusChip};
 use crate::docker::client;
 use crate::docker::types::{Container, ContainerDetail, Stats};
 
@@ -43,11 +43,23 @@ pub struct ContainerDetailInit {
     pub container: Container,
 }
 
+/// A start/stop the user triggered from this page that's still in flight. Drives
+/// the "Starting…" / "Stopping…" feedback on the button and status chip.
+#[derive(Debug, Clone, Copy)]
+enum Pending {
+    Starting,
+    Stopping,
+}
+
 pub struct ContainerDetailPage {
     /// Kept for the periodic re-inspect and to (re)start the stats stream. An
     /// `Arc`-backed handle, cheap to hold.
     docker: Docker,
     container: Container,
+    /// A start/stop triggered here and not yet settled. Cleared when the
+    /// container reaches the target state (via `inspect`) or when `AppModel`
+    /// reports the action finished — so it never spins forever on failure.
+    pending: Option<Pending>,
     /// Filled in when `inspect` returns; `None` until then.
     detail: Option<ContainerDetail>,
     /// Container start time as Unix seconds, parsed from `detail.started_at`.
@@ -77,6 +89,10 @@ pub enum DetailInput {
     Refresh,
     /// The start/stop button was clicked. Reads current state to decide which.
     ToggleClicked,
+    /// `AppModel` reports the dispatched start/stop finished (the bool is
+    /// success). Sent so the transitional feedback clears on failure too, not
+    /// only when a later inspect happens to see the state flip.
+    ActionFinished(bool),
 }
 
 /// Intents the page sends up. Like the row, the detail page never calls Docker
@@ -113,20 +129,52 @@ impl Component for ContainerDetailPage {
                     // the start side (back button), so this sits at the end.
                     pack_end = &gtk::Button {
                         connect_clicked => DetailInput::ToggleClicked,
+                        // Locked while the action is in flight, so it can't be
+                        // re-triggered and reads as "busy".
+                        #[watch]
+                        set_sensitive: model.pending.is_none(),
 
+                        // A Stack so the button holds one stable slot as its
+                        // contents swap: the normal icon+label, or a spinner with
+                        // a "Starting…"/"Stopping…" label while pending.
                         #[wrap(Some)]
-                        set_child = &adw::ButtonContent {
-                            #[watch]
-                            set_icon_name: if model.container.state.is_running() {
-                                "media-playback-stop-symbolic"
-                            } else {
-                                "media-playback-start-symbolic"
+                        set_child = &gtk::Stack {
+                            add_named[Some("idle")] = &adw::ButtonContent {
+                                #[watch]
+                                set_icon_name: if model.container.state.is_running() {
+                                    "media-playback-stop-symbolic"
+                                } else {
+                                    "media-playback-start-symbolic"
+                                },
+                                #[watch]
+                                set_label: if model.container.state.is_running() {
+                                    "Stop"
+                                } else {
+                                    "Start"
+                                },
                             },
+
+                            add_named[Some("busy")] = &gtk::Box {
+                                set_spacing: 8,
+                                set_halign: gtk::Align::Center,
+
+                                gtk::Spinner {
+                                    // Only spin while shown; a hidden spinner
+                                    // still burns frames.
+                                    #[watch]
+                                    set_spinning: model.pending.is_some(),
+                                },
+                                gtk::Label {
+                                    #[watch]
+                                    set_label: model.pending_label(),
+                                },
+                            },
+
                             #[watch]
-                            set_label: if model.container.state.is_running() {
-                                "Stop"
+                            set_visible_child_name: if model.pending.is_some() {
+                                "busy"
                             } else {
-                                "Start"
+                                "idle"
                             },
                         },
                     },
@@ -183,15 +231,31 @@ impl Component for ContainerDetailPage {
                                                 add_css_class: "dim-label",
                                                 set_halign: gtk::Align::Start,
                                             },
-                                            gtk::Label {
+                                            // The shared status chip (same widget
+                                            // the list rows use). Pending-aware
+                                            // via `transition()`: "Starting…" /
+                                            // "Stopping…" in a neutral tint while
+                                            // the action is in flight, else the
+                                            // real state.
+                                            #[template]
+                                            StatusChip {
                                                 set_halign: gtk::Align::Start,
-                                                #[watch]
-                                                set_label: status_chip::label(model.container.state),
                                                 #[watch]
                                                 set_css_classes: &[
                                                     "status-chip",
-                                                    status_chip::variant(model.container.state),
+                                                    status_chip::variant(
+                                                        model.container.state,
+                                                        model.transition(),
+                                                    ),
                                                 ],
+                                                #[template_child]
+                                                label {
+                                                    #[watch]
+                                                    set_label: status_chip::label(
+                                                        model.container.state,
+                                                        model.transition(),
+                                                    ),
+                                                },
                                             },
                                         },
                                     },
@@ -386,6 +450,7 @@ impl Component for ContainerDetailPage {
         let mut model = ContainerDetailPage {
             docker: init.docker,
             container: init.container,
+            pending: None,
             detail: None,
             started_unix: None,
             latest: None,
@@ -473,14 +538,29 @@ impl Component for ContainerDetailPage {
 
             DetailInput::ToggleClicked => {
                 // Decide here from current state, not in the button's closure,
-                // so it's never stale (same reason as the list row).
+                // so it's never stale (same reason as the list row). Set the
+                // pending feedback at the same time, from the same reading, so
+                // the button and chip show "Starting…"/"Stopping…" at once.
                 let id = self.container.id.clone();
-                let out = if self.container.state.is_running() {
-                    DetailOutput::Stop(id)
+                let (out, pending) = if self.container.state.is_running() {
+                    (DetailOutput::Stop(id), Pending::Stopping)
                 } else {
-                    DetailOutput::Start(id)
+                    (DetailOutput::Start(id), Pending::Starting)
                 };
+                self.pending = Some(pending);
                 sender.output(out).ok();
+            }
+
+            DetailInput::ActionFinished(ok) => {
+                // The dispatched action settled. On failure, drop the
+                // transitional feedback now — the state won't flip, so nothing
+                // else would clear it. Either way, inspect immediately so the
+                // chip/button catch up without waiting for the 2s timer; on
+                // success that's what clears `pending`, once the new state lands.
+                if !ok {
+                    self.pending = None;
+                }
+                sender.input(DetailInput::Refresh);
             }
 
             DetailInput::Refresh => {
@@ -511,6 +591,19 @@ impl Component for ContainerDetailPage {
                 self.container.ports = detail.ports.clone();
                 self.started_unix = detail.started_at.as_deref().and_then(parse_unix);
                 self.detail = Some(detail);
+                // Clear the transitional feedback once the container actually
+                // reaches the state the click was driving toward. Anything that
+                // reaches that state counts — the button's own effect, or an
+                // external change — which is exactly when the feedback is stale.
+                if let Some(pending) = self.pending {
+                    let reached = match pending {
+                        Pending::Starting => self.container.state.is_running(),
+                        Pending::Stopping => !self.container.state.is_running(),
+                    };
+                    if reached {
+                        self.pending = None;
+                    }
+                }
                 // If it just came up (via the button or elsewhere), (re)start
                 // the graphs and the log stream. Both self-guard against a
                 // double subscribe, so sending on every running poll is fine.
@@ -618,6 +711,23 @@ impl ContainerDetailPage {
             .map(|d| d.to_unix())
             .unwrap_or(started);
         format_duration((now - started).max(0))
+    }
+
+    /// The chip's in-flight override, if an action is running. Drives both the
+    /// shared status chip (`Some(_)` → neutral tint + this text) and the button's
+    /// busy label below.
+    fn transition(&self) -> Option<&'static str> {
+        match self.pending {
+            Some(Pending::Starting) => Some("Starting…"),
+            Some(Pending::Stopping) => Some("Stopping…"),
+            None => None,
+        }
+    }
+
+    /// The button's label while an action is in flight (only shown on the busy
+    /// Stack page, so the `None` fallback never renders).
+    fn pending_label(&self) -> &'static str {
+        self.transition().unwrap_or("")
     }
 
     /// Current CPU %, or "—" before the first sample / when stopped.
