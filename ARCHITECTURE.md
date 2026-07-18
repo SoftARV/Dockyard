@@ -578,6 +578,35 @@ lines and would otherwise print them twice. See "Streaming, and cancelling a
 stream" for the two-level ownership cascade that cancels both streams on
 navigate-back.
 
+**[#22–#23] Detail layout, refined** — the wide side-by-side split began 50/50
+(a homogeneous box), then moved to **40/60** in favour of the logs: a `gtk::Grid`
+with `column-homogeneous` and 2:3 column spans set on the breakpoint's *layout
+children*, so the 64-char container ID no longer inflates the info column and
+starves the log pane. The log panel also gained `overflow: hidden` so its
+`TextView` clips to the `.card` radius — it reads as a proper card now, not a
+square poking out of a rounded one.
+
+**[#24] Licensed GPL-3.0-or-later** — the project is formally open source: the
+full GPLv3 in `COPYING`, `license = "GPL-3.0-or-later"` in `Cargo.toml`, a README
+statement and badge, and the two-line REUSE/SPDX header atop every source file.
+GPL keeps distributed derivatives open (the GNOME-app norm); GTK/libadwaita being
+LGPL never forced the choice, and relm4 (MIT/Apache) and bollard (Apache-2.0) are
+GPL-compatible.
+
+**[#25] A primary menu** — the GNOME hamburger (`open-menu-symbolic`) in the
+header, holding **Refresh** (Ctrl+R / F5), **About** (an `adw::AboutDialog`), and
+**Quit** (Ctrl+Q); Refresh moved off its own header button. This is the first use
+of relm4's **actions**, and it's forced: a `gio::Menu` item can only invoke a
+`GAction` — it can't send a relm4 message. So the menu is a real menu model (the
+`menu!` macro) whose items name actions in a "win" group registered on the
+window. The actions stay thin: Refresh and About just post an `AppMsg`, so the
+work still lands in the one reducer; only Quit acts directly
+(`main_application().quit()`). One wrinkle: an action's `enabled` can't be
+`#[watch]`ed from `view!`, so to keep the old refresh button's "disabled until
+connected" behaviour the model holds the `GAction` handle and flips it
+imperatively in the `Connected` handler — the same escape-hatch reasoning as the
+held `nav`/`toast_overlay` handles.
+
 ### How the app finds its own icon (and why Wayland is the twist)
 
 The instinct — "the app sets its window icon" — is **wrong on Wayland**, and
@@ -703,7 +732,9 @@ health beyond "running" (see "Known rough edges").
 - The row menu is a hand-built `gtk::Popover` of plain buttons, not a
   `gtk::PopoverMenu` with a menu model. It works, but it needs manual
   dismissal and lacks the keyboard and screen-reader behaviour a real menu
-  gets free. Worth converting if the menu grows past restart/remove.
+  gets free. The header's primary menu (#25) shows the model-based way now, so
+  converting the row menu is a matter of following that pattern if it grows past
+  restart/remove.
 - The rootless socket path is only reachable on a rootless install; on this
   machine it's tested by faking `XDG_RUNTIME_DIR`.
 
