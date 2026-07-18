@@ -412,6 +412,12 @@ impl Component for ContainerDetailPage {
                 "orientation",
                 Some(&gtk::Orientation::Horizontal.to_value()),
             );
+            // Split the row 50/50. Without this the info column's widest row —
+            // the 64-char container ID — inflates its natural width and starves
+            // the logs. Homogeneous only makes sense side-by-side, so it rides
+            // the breakpoint too and is restored (to false) when stacked, where
+            // equal *heights* would be wrong.
+            breakpoint.add_setter(&widgets.body, "homogeneous", Some(&true.to_value()));
             widgets.breakpoint_bin.add_breakpoint(breakpoint);
         }
 
