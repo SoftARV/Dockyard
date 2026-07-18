@@ -257,6 +257,27 @@ impl AppModel {
         }
     }
 
+    /// Header subtitle: how many containers there are and how many are running.
+    /// Counts the full set, not the filtered view, so it stays a stable summary
+    /// of the machine regardless of any active search. Empty until connected, so
+    /// the subtitle line stays hidden while loading or disconnected.
+    fn header_subtitle(&self) -> String {
+        if !matches!(self.state, ViewState::Ready) {
+            return String::new();
+        }
+        let total = self.all_containers.len();
+        let running = self
+            .all_containers
+            .iter()
+            .filter(|c| c.state.is_running())
+            .count();
+        match total {
+            0 => "No containers".to_owned(),
+            1 => format!("1 container · {running} running"),
+            n => format!("{n} containers · {running} running"),
+        }
+    }
+
     /// Which `Stack` page to show: the true "no containers" empty state, the
     /// "nothing matches your search" state, or the list itself.
     fn list_page(&self) -> &'static str {
@@ -357,6 +378,17 @@ impl Component for AppModel {
 
                         adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                // Title plus a live subtitle counting containers.
+                                // `adw::WindowTitle` is the standard way to give a
+                                // header bar a subtitle; it hides the subtitle line
+                                // when the text is empty (loading / disconnected).
+                                #[wrap(Some)]
+                                set_title_widget = &adw::WindowTitle {
+                                    set_title: "Dockyard",
+                                    #[watch]
+                                    set_subtitle: &model.header_subtitle(),
+                                },
+
                                 // The search toggle, on the far left — opposite
                                 // the menu button. Two-way-bound in `init` to the
                                 // search bar's reveal state, so it stays lit while
