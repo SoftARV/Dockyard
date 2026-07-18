@@ -340,7 +340,11 @@ impl Component for AppModel {
     view! {
         adw::ApplicationWindow {
             set_title: Some("Dockyard"),
-            set_default_size: (540, 720),
+            // Opens wide enough (≥720px) that clicking into a container lands on
+            // the detail page's wide layout — cards in a row, info beside logs —
+            // rather than the narrow fallback. The list doesn't need this width
+            // (it's clamped below), but the detail page does.
+            set_default_size: (900, 720),
 
             #[local_ref]
             toast_overlay -> adw::ToastOverlay {
@@ -423,8 +427,18 @@ impl Component for AppModel {
                                 ViewState::Ready => gtk::Stack {
                                     add_named[Some("list")] = &gtk::ScrolledWindow {
                                         set_vexpand: true,
-                                        gtk::Box {
-                                            set_orientation: gtk::Orientation::Vertical,
+
+                                        // Clamp the rows to a readable width instead
+                                        // of letting them stretch the full (now
+                                        // wider) window — a row with its title on the
+                                        // far left and controls on the far right,
+                                        // metres apart, reads badly. 600/400 are the
+                                        // Adwaita preferences-content sizes, the same
+                                        // clamp Settings uses, so the list sits
+                                        // centred and familiar.
+                                        adw::Clamp {
+                                            set_maximum_size: 600,
+                                            set_tightening_threshold: 400,
                                             set_margin_all: 12,
 
                                             #[local_ref]
