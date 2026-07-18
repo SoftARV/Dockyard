@@ -8,7 +8,7 @@
 //! inline — every Docker call is dispatched as a relm4 `Command` so the GTK main
 //! thread never blocks (CLAUDE.md rule 4).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use bollard::Docker;
 use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
@@ -21,9 +21,11 @@ use relm4::{
 };
 use tracing::debug;
 
-use crate::components::container_detail::{ContainerDetailInit, ContainerDetailPage, DetailOutput};
+use crate::components::container_detail::{
+    ContainerDetailInit, ContainerDetailPage, DetailInput, DetailOutput,
+};
 use crate::components::container_row::{
-    ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput,
+    ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput, RowPending,
 };
 use crate::docker::client;
 use crate::docker::types::Container;
@@ -61,9 +63,10 @@ pub struct AppModel {
     /// for display in the "no matches" page.
     query: String,
     state: ViewState,
-    /// Containers with an action in flight. The rows own the spinner, but the
-    /// set lives here so a row rebuilt mid-action can be given its state back.
-    busy: HashSet<String>,
+    /// The action in flight per container id. The rows own the spinner and the
+    /// transitional chip, but the mapping lives here so a row rebuilt mid-action
+    /// can be handed its pending state — and its kind — back.
+    pending: HashMap<String, Action>,
     /// A refresh the user actually asked for. The 2s poll deliberately doesn't
     /// set this: a spinner blinking every 2s forever is worse than no feedback.
     refreshing: bool,
@@ -82,6 +85,10 @@ pub struct AppModel {
     /// alive; dropping it (on navigate-back) shuts it and its embedded logs
     /// stream down via `drop_on_shutdown`.
     detail: Option<Controller<ContainerDetailPage>>,
+    /// The container id the open detail page is showing, so an `ActionDone` can
+    /// be forwarded to it (to clear its "Starting…"/"Stopping…" feedback) only
+    /// when it's for that container — not for some other row's action.
+    detail_id: Option<String>,
     /// Held so `update` can raise toasts. This is a refcounted GTK handle, not
     /// shared model state — cloning it is just a pointer bump, and it's the
     /// standard relm4 escape hatch for widgets that are commanded rather than
@@ -168,6 +175,18 @@ impl Action {
     }
 }
 
+/// Map a lifecycle `Action` to the row's transitional-chip kind. Kept here (not
+/// a `From` on the row's type) because the mapping is `AppModel`'s concern — the
+/// row just renders whatever kind it's handed.
+fn row_pending(action: Action) -> RowPending {
+    match action {
+        Action::Start => RowPending::Starting,
+        Action::Stop => RowPending::Stopping,
+        Action::Restart => RowPending::Restarting,
+        Action::Remove => RowPending::Removing,
+    }
+}
+
 impl AppModel {
     fn toast(&self, message: &str) {
         self.toast_overlay.add_toast(adw::Toast::new(message));
@@ -179,7 +198,7 @@ impl AppModel {
             return;
         };
 
-        self.set_busy(&id, true);
+        self.set_pending(&id, Some(action));
 
         let action_id = id.clone();
         sender.oneshot_command(async move {
@@ -243,17 +262,44 @@ impl AppModel {
             .unwrap_or_else(|| id.chars().take(12).collect())
     }
 
-    /// Track the action and tell the row to show or hide its spinner.
-    fn set_busy(&mut self, id: &str, busy: bool) {
-        if busy {
-            self.busy.insert(id.to_owned());
-        } else {
-            self.busy.remove(id);
+    /// Track the in-flight action and tell the row to show or hide its spinner
+    /// and transitional chip. `Some(action)` starts it, `None` clears it.
+    fn set_pending(&mut self, id: &str, action: Option<Action>) {
+        match action {
+            Some(action) => {
+                self.pending.insert(id.to_owned(), action);
+            }
+            None => {
+                self.pending.remove(id);
+            }
         }
 
         if let Some(index) = self.containers.iter().position(|row| row.id() == id) {
-            self.containers
-                .send(index, ContainerRowInput::SetBusy(busy));
+            self.containers.send(
+                index,
+                ContainerRowInput::SetPending(action.map(row_pending)),
+            );
+        }
+    }
+
+    /// Header subtitle: how many containers there are and how many are running.
+    /// Counts the full set, not the filtered view, so it stays a stable summary
+    /// of the machine regardless of any active search. Empty until connected, so
+    /// the subtitle line stays hidden while loading or disconnected.
+    fn header_subtitle(&self) -> String {
+        if !matches!(self.state, ViewState::Ready) {
+            return String::new();
+        }
+        let total = self.all_containers.len();
+        let running = self
+            .all_containers
+            .iter()
+            .filter(|c| c.state.is_running())
+            .count();
+        match total {
+            0 => "No containers".to_owned(),
+            1 => format!("1 container · {running} running"),
+            n => format!("{n} containers · {running} running"),
         }
     }
 
@@ -322,7 +368,7 @@ impl AppModel {
                 // Hand the spinner state back, or a container mid-action would
                 // stop spinning the instant the visible set changed under it.
                 guard.push_back(ContainerRowInit {
-                    busy: self.busy.contains(&container.id),
+                    pending: self.pending.get(&container.id).copied().map(row_pending),
                     container,
                 });
             }
@@ -357,6 +403,17 @@ impl Component for AppModel {
 
                         adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                // Title plus a live subtitle counting containers.
+                                // `adw::WindowTitle` is the standard way to give a
+                                // header bar a subtitle; it hides the subtitle line
+                                // when the text is empty (loading / disconnected).
+                                #[wrap(Some)]
+                                set_title_widget = &adw::WindowTitle {
+                                    set_title: "Dockyard",
+                                    #[watch]
+                                    set_subtitle: &model.header_subtitle(),
+                                },
+
                                 // The search toggle, on the far left — opposite
                                 // the menu button. Two-way-bound in `init` to the
                                 // search bar's reveal state, so it stays lit while
@@ -526,11 +583,12 @@ impl Component for AppModel {
             all_containers: Vec::new(),
             query: String::new(),
             state: ViewState::Loading,
-            busy: HashSet::new(),
+            pending: HashMap::new(),
             refreshing: false,
             poll: None,
             nav: adw::NavigationView::new(),
             detail: None,
+            detail_id: None,
             toast_overlay: adw::ToastOverlay::new(),
             refresh_action: refresh_action.gio_action().clone(),
         };
@@ -733,6 +791,7 @@ impl Component for AppModel {
                     });
                 self.nav.push(controller.widget());
                 self.detail = Some(controller);
+                self.detail_id = Some(id);
                 self.stop_poll();
             }
 
@@ -740,6 +799,7 @@ impl Component for AppModel {
                 // Dropping the detail controller shuts it — and its embedded
                 // logs stream — down. Resume the list.
                 self.detail = None;
+                self.detail_id = None;
                 self.start_poll(&sender);
                 sender.input(AppMsg::Refresh);
             }
@@ -816,7 +876,8 @@ impl Component for AppModel {
             }
 
             CommandMsg::ActionDone { id, action, result } => {
-                self.set_busy(&id, false);
+                self.set_pending(&id, None);
+                let ok = result.is_ok();
 
                 if let Err(reason) = result {
                     // Name the container rather than echoing Docker's 64-char
@@ -827,6 +888,16 @@ impl Component for AppModel {
                         "Couldn't {} {name}: {reason}",
                         action.verb()
                     )));
+                }
+
+                // If the open detail page is showing this container, tell it the
+                // action settled so it drops its "Starting…"/"Stopping…" feedback
+                // — right away on failure (the state won't flip to clear it),
+                // and on success once its refresh sees the new state land.
+                if self.detail_id.as_deref() == Some(id.as_str())
+                    && let Some(detail) = &self.detail
+                {
+                    detail.sender().emit(DetailInput::ActionFinished(ok));
                 }
 
                 // Don't wait up to 2s for the poll to notice: the user just

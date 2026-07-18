@@ -16,7 +16,6 @@
 
 use bollard::Docker;
 use futures_util::{FutureExt, StreamExt};
-use relm4::abstractions::DrawHandler;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
 use relm4::{
@@ -25,18 +24,16 @@ use relm4::{
 };
 
 use crate::components::logs_view::{LogsInit, LogsInput, LogsView};
-use crate::components::status_chip;
+use crate::components::sparkline::{Scale, Sparkline, SparklineInit, SparklineInput};
+use crate::components::status_chip::{self, StatusChip};
 use crate::docker::client;
 use crate::docker::types::{Container, ContainerDetail, Stats};
 
 /// Window width at which the layout switches from stacked to side-by-side.
 const WIDE_BREAKPOINT: &str = "min-width: 720px";
 
-/// How many recent samples each graph keeps.
-const HISTORY: usize = 60;
-
-/// Graph line colours (Adwaita blue-3 / purple-3). Fixed rather than
-/// theme-derived, so CPU and memory stay visually distinct.
+/// Graph line colours (Adwaita blue-3 / purple-3), handed to each `Sparkline`.
+/// Fixed rather than theme-derived, so CPU and memory stay visually distinct.
 const CPU_COLOR: gtk::gdk::RGBA = gtk::gdk::RGBA::new(0.384, 0.627, 0.918, 1.0); // #62a0ea
 const MEM_COLOR: gtk::gdk::RGBA = gtk::gdk::RGBA::new(0.753, 0.380, 0.796, 1.0); // #c061cb
 
@@ -46,28 +43,37 @@ pub struct ContainerDetailInit {
     pub container: Container,
 }
 
+/// A start/stop the user triggered from this page that's still in flight. Drives
+/// the "Starting…" / "Stopping…" feedback on the button and status chip.
+#[derive(Debug, Clone, Copy)]
+enum Pending {
+    Starting,
+    Stopping,
+}
+
 pub struct ContainerDetailPage {
     /// Kept for the periodic re-inspect and to (re)start the stats stream. An
     /// `Arc`-backed handle, cheap to hold.
     docker: Docker,
     container: Container,
+    /// A start/stop triggered here and not yet settled. Cleared when the
+    /// container reaches the target state (via `inspect`) or when `AppModel`
+    /// reports the action finished — so it never spins forever on failure.
+    pending: Option<Pending>,
     /// Filled in when `inspect` returns; `None` until then.
     detail: Option<ContainerDetail>,
     /// Container start time as Unix seconds, parsed from `detail.started_at`.
     /// Drives the live uptime; `None` when not running or not yet loaded.
     started_unix: Option<i64>,
-    /// The most recent stats sample, for the current CPU/memory values.
+    /// The most recent stats sample, for the current CPU/memory value labels.
     latest: Option<Stats>,
-    /// Recent CPU % and memory %, oldest first, for the graphs.
-    cpu_history: Vec<f64>,
-    mem_history: Vec<f64>,
     /// Whether a stats stream is currently running, so we don't start a second
     /// when a re-inspect confirms the container is still up.
     stats_active: bool,
-    /// The two graph surfaces. relm4's `DrawHandler` keeps a cairo surface we
-    /// repaint from `*_history` on each sample — no `Rc<RefCell>` needed.
-    cpu_draw: DrawHandler,
-    mem_draw: DrawHandler,
+    /// The two graphs. Each owns its own history and drawing; we just feed them
+    /// samples. Holding the `Controller`s keeps them alive with this page.
+    cpu_graph: Controller<Sparkline>,
+    mem_graph: Controller<Sparkline>,
     /// The embedded log panel. Holding its `Controller` is what keeps the log
     /// stream alive; when this page's controller is dropped (navigate-back), so
     /// is this, which shuts the stream down via `drop_on_shutdown`.
@@ -83,6 +89,10 @@ pub enum DetailInput {
     Refresh,
     /// The start/stop button was clicked. Reads current state to decide which.
     ToggleClicked,
+    /// `AppModel` reports the dispatched start/stop finished (the bool is
+    /// success). Sent so the transitional feedback clears on failure too, not
+    /// only when a later inspect happens to see the state flip.
+    ActionFinished(bool),
 }
 
 /// Intents the page sends up. Like the row, the detail page never calls Docker
@@ -119,20 +129,52 @@ impl Component for ContainerDetailPage {
                     // the start side (back button), so this sits at the end.
                     pack_end = &gtk::Button {
                         connect_clicked => DetailInput::ToggleClicked,
+                        // Locked while the action is in flight, so it can't be
+                        // re-triggered and reads as "busy".
+                        #[watch]
+                        set_sensitive: model.pending.is_none(),
 
+                        // A Stack so the button holds one stable slot as its
+                        // contents swap: the normal icon+label, or a spinner with
+                        // a "Starting…"/"Stopping…" label while pending.
                         #[wrap(Some)]
-                        set_child = &adw::ButtonContent {
-                            #[watch]
-                            set_icon_name: if model.container.state.is_running() {
-                                "media-playback-stop-symbolic"
-                            } else {
-                                "media-playback-start-symbolic"
+                        set_child = &gtk::Stack {
+                            add_named[Some("idle")] = &adw::ButtonContent {
+                                #[watch]
+                                set_icon_name: if model.container.state.is_running() {
+                                    "media-playback-stop-symbolic"
+                                } else {
+                                    "media-playback-start-symbolic"
+                                },
+                                #[watch]
+                                set_label: if model.container.state.is_running() {
+                                    "Stop"
+                                } else {
+                                    "Start"
+                                },
                             },
+
+                            add_named[Some("busy")] = &gtk::Box {
+                                set_spacing: 8,
+                                set_halign: gtk::Align::Center,
+
+                                gtk::Spinner {
+                                    // Only spin while shown; a hidden spinner
+                                    // still burns frames.
+                                    #[watch]
+                                    set_spinning: model.pending.is_some(),
+                                },
+                                gtk::Label {
+                                    #[watch]
+                                    set_label: model.pending_label(),
+                                },
+                            },
+
                             #[watch]
-                            set_label: if model.container.state.is_running() {
-                                "Stop"
+                            set_visible_child_name: if model.pending.is_some() {
+                                "busy"
                             } else {
-                                "Start"
+                                "idle"
                             },
                         },
                     },
@@ -189,15 +231,31 @@ impl Component for ContainerDetailPage {
                                                 add_css_class: "dim-label",
                                                 set_halign: gtk::Align::Start,
                                             },
-                                            gtk::Label {
+                                            // The shared status chip (same widget
+                                            // the list rows use). Pending-aware
+                                            // via `transition()`: "Starting…" /
+                                            // "Stopping…" in a neutral tint while
+                                            // the action is in flight, else the
+                                            // real state.
+                                            #[template]
+                                            StatusChip {
                                                 set_halign: gtk::Align::Start,
-                                                #[watch]
-                                                set_label: status_chip::label(model.container.state),
                                                 #[watch]
                                                 set_css_classes: &[
                                                     "status-chip",
-                                                    status_chip::variant(model.container.state),
+                                                    status_chip::variant(
+                                                        model.container.state,
+                                                        model.transition(),
+                                                    ),
                                                 ],
+                                                #[template_child]
+                                                label {
+                                                    #[watch]
+                                                    set_label: status_chip::label(
+                                                        model.container.state,
+                                                        model.transition(),
+                                                    ),
+                                                },
                                             },
                                         },
                                     },
@@ -227,10 +285,13 @@ impl Component for ContainerDetailPage {
                                         },
                                     },
 
-                                    // CPU card.
+                                    // CPU card. The sparkline is a child
+                                    // component appended to this card's body in
+                                    // `init`, below the caption/value header.
                                     gtk::Box {
                                         add_css_class: "card",
 
+                                        #[name = "cpu_card"]
                                         gtk::Box {
                                             set_orientation: gtk::Orientation::Vertical,
                                             set_spacing: 8,
@@ -253,18 +314,15 @@ impl Component for ContainerDetailPage {
                                                     set_halign: gtk::Align::End,
                                                 },
                                             },
-                                            #[local_ref]
-                                            cpu_area -> gtk::DrawingArea {
-                                                set_content_height: 44,
-                                                set_hexpand: true,
-                                            },
                                         },
                                     },
 
-                                    // Memory card.
+                                    // Memory card. Same shape as the CPU card; its
+                                    // sparkline is appended in `init` too.
                                     gtk::Box {
                                         add_css_class: "card",
 
+                                        #[name = "mem_card"]
                                         gtk::Box {
                                             set_orientation: gtk::Orientation::Vertical,
                                             set_spacing: 8,
@@ -286,11 +344,6 @@ impl Component for ContainerDetailPage {
                                                     add_css_class: "numeric",
                                                     set_halign: gtk::Align::End,
                                                 },
-                                            },
-                                            #[local_ref]
-                                            mem_area -> gtk::DrawingArea {
-                                                set_content_height: 44,
-                                                set_hexpand: true,
                                             },
                                         },
                                     },
@@ -377,22 +430,42 @@ impl Component for ContainerDetailPage {
             })
             .detach();
 
+        // The two graphs, configured with their colour and axis scaling. CPU can
+        // exceed 100% across cores, so its axis grows to the peak; memory is a
+        // percentage of the limit, so it's fixed at 100. Neither reports back, so
+        // `.detach()`.
+        let cpu_graph = Sparkline::builder()
+            .launch(SparklineInit {
+                color: CPU_COLOR,
+                scale: Scale::PeakFloor(100.0),
+            })
+            .detach();
+        let mem_graph = Sparkline::builder()
+            .launch(SparklineInit {
+                color: MEM_COLOR,
+                scale: Scale::Fixed(100.0),
+            })
+            .detach();
+
         let mut model = ContainerDetailPage {
             docker: init.docker,
             container: init.container,
+            pending: None,
             detail: None,
             started_unix: None,
             latest: None,
-            cpu_history: Vec::new(),
-            mem_history: Vec::new(),
             stats_active: false,
-            cpu_draw: DrawHandler::new(),
-            mem_draw: DrawHandler::new(),
+            cpu_graph,
+            mem_graph,
             logs,
         };
-        let cpu_area = model.cpu_draw.drawing_area();
-        let mem_area = model.mem_draw.drawing_area();
         let widgets = view_output!();
+
+        // Slot each sparkline into its card body, below the caption/value header.
+        // Like the logs panel, these are existing controller widgets, so they're
+        // appended here rather than built in the `view!`.
+        widgets.cpu_card.append(model.cpu_graph.widget());
+        widgets.mem_card.append(model.mem_graph.widget());
 
         // Attach the logs panel below the info column (row 1) — the stacked
         // default. It's an existing controller widget, so it's attached here
@@ -465,14 +538,29 @@ impl Component for ContainerDetailPage {
 
             DetailInput::ToggleClicked => {
                 // Decide here from current state, not in the button's closure,
-                // so it's never stale (same reason as the list row).
+                // so it's never stale (same reason as the list row). Set the
+                // pending feedback at the same time, from the same reading, so
+                // the button and chip show "Starting…"/"Stopping…" at once.
                 let id = self.container.id.clone();
-                let out = if self.container.state.is_running() {
-                    DetailOutput::Stop(id)
+                let (out, pending) = if self.container.state.is_running() {
+                    (DetailOutput::Stop(id), Pending::Stopping)
                 } else {
-                    DetailOutput::Start(id)
+                    (DetailOutput::Start(id), Pending::Starting)
                 };
+                self.pending = Some(pending);
                 sender.output(out).ok();
+            }
+
+            DetailInput::ActionFinished(ok) => {
+                // The dispatched action settled. On failure, drop the
+                // transitional feedback now — the state won't flip, so nothing
+                // else would clear it. Either way, inspect immediately so the
+                // chip/button catch up without waiting for the 2s timer; on
+                // success that's what clears `pending`, once the new state lands.
+                if !ok {
+                    self.pending = None;
+                }
+                sender.input(DetailInput::Refresh);
             }
 
             DetailInput::Refresh => {
@@ -503,6 +591,19 @@ impl Component for ContainerDetailPage {
                 self.container.ports = detail.ports.clone();
                 self.started_unix = detail.started_at.as_deref().and_then(parse_unix);
                 self.detail = Some(detail);
+                // Clear the transitional feedback once the container actually
+                // reaches the state the click was driving toward. Anything that
+                // reaches that state counts — the button's own effect, or an
+                // external change — which is exactly when the feedback is stale.
+                if let Some(pending) = self.pending {
+                    let reached = match pending {
+                        Pending::Starting => self.container.state.is_running(),
+                        Pending::Stopping => !self.container.state.is_running(),
+                    };
+                    if reached {
+                        self.pending = None;
+                    }
+                }
                 // If it just came up (via the button or elsewhere), (re)start
                 // the graphs and the log stream. Both self-guard against a
                 // double subscribe, so sending on every running poll is fine.
@@ -517,15 +618,18 @@ impl Component for ContainerDetailPage {
             }
 
             DetailCmd::StatsSample(stats) => {
-                push_capped(&mut self.cpu_history, stats.cpu_percent);
                 let mem_pct = if stats.mem_limit > 0 {
                     stats.mem_used as f64 / stats.mem_limit as f64 * 100.0
                 } else {
                     0.0
                 };
-                push_capped(&mut self.mem_history, mem_pct);
+                // Hand each graph its sample; the value labels beside them read
+                // `latest` via #[watch] on the next update pass.
+                self.cpu_graph
+                    .sender()
+                    .emit(SparklineInput::Push(stats.cpu_percent));
+                self.mem_graph.sender().emit(SparklineInput::Push(mem_pct));
                 self.latest = Some(stats);
-                self.redraw();
             }
 
             DetailCmd::StatsEnded => {
@@ -568,95 +672,6 @@ impl ContainerDetailPage {
                 .boxed()
         });
     }
-
-    /// Repaint both graph surfaces from their history.
-    fn redraw(&mut self) {
-        // CPU can exceed 100% on multiple cores, so scale to the peak seen.
-        let cpu_max = self.cpu_history.iter().copied().fold(100.0_f64, f64::max);
-        let (cw, ch) = (self.cpu_draw.width(), self.cpu_draw.height());
-        draw_graph(
-            &self.cpu_draw.get_context(),
-            cw,
-            ch,
-            &self.cpu_history,
-            cpu_max,
-            CPU_COLOR,
-        );
-
-        let (mw, mh) = (self.mem_draw.width(), self.mem_draw.height());
-        draw_graph(
-            &self.mem_draw.get_context(),
-            mw,
-            mh,
-            &self.mem_history,
-            100.0,
-            MEM_COLOR,
-        );
-    }
-}
-
-/// Push a value, dropping the oldest once past the history cap.
-fn push_capped(history: &mut Vec<f64>, value: f64) {
-    history.push(value);
-    if history.len() > HISTORY {
-        history.remove(0);
-    }
-}
-
-/// Draw a filled sparkline of `samples` (scaled to `max`) across the surface,
-/// in the theme's text `color` so it adapts to light/dark.
-fn draw_graph(
-    cx: &gtk::cairo::Context,
-    width: i32,
-    height: i32,
-    samples: &[f64],
-    max: f64,
-    color: gtk::gdk::RGBA,
-) {
-    // The DrawHandler surface keeps its last contents; clear before repainting.
-    cx.set_operator(gtk::cairo::Operator::Clear);
-    let _ = cx.paint();
-    cx.set_operator(gtk::cairo::Operator::Over);
-
-    let (w, h) = (width as f64, height as f64);
-    if samples.len() < 2 || max <= 0.0 || w <= 0.0 {
-        return;
-    }
-
-    // Anchor the newest sample to the right edge, so the line scrolls left as it
-    // fills rather than stretching.
-    let step = w / (HISTORY - 1) as f64;
-    let point = |i: usize, count: usize| {
-        let x = w - (count - 1 - i) as f64 * step;
-        let v = (samples[i] / max).clamp(0.0, 1.0);
-        (x, h - v * h)
-    };
-    let n = samples.len();
-
-    cx.new_path();
-    let (x0, y0) = point(0, n);
-    cx.move_to(x0, y0);
-    for i in 1..n {
-        let (x, y) = point(i, n);
-        cx.line_to(x, y);
-    }
-
-    let (r, g, b) = (
-        color.red() as f64,
-        color.green() as f64,
-        color.blue() as f64,
-    );
-    cx.set_source_rgba(r, g, b, 0.85);
-    cx.set_line_width(1.5);
-    let _ = cx.stroke_preserve();
-
-    // Fill under the line.
-    let (xn, _) = point(n - 1, n);
-    cx.line_to(xn, h);
-    cx.line_to(x0, h);
-    cx.close_path();
-    cx.set_source_rgba(r, g, b, 0.12);
-    let _ = cx.fill();
 }
 
 /// Bytes as a compact "340 MB" / "1.4 GB".
@@ -696,6 +711,23 @@ impl ContainerDetailPage {
             .map(|d| d.to_unix())
             .unwrap_or(started);
         format_duration((now - started).max(0))
+    }
+
+    /// The chip's in-flight override, if an action is running. Drives both the
+    /// shared status chip (`Some(_)` → neutral tint + this text) and the button's
+    /// busy label below.
+    fn transition(&self) -> Option<&'static str> {
+        match self.pending {
+            Some(Pending::Starting) => Some("Starting…"),
+            Some(Pending::Stopping) => Some("Stopping…"),
+            None => None,
+        }
+    }
+
+    /// The button's label while an action is in flight (only shown on the busy
+    /// Stack page, so the `None` fallback never renders).
+    fn pending_label(&self) -> &'static str {
+        self.transition().unwrap_or("")
     }
 
     /// Current CPU %, or "—" before the first sample / when stopped.
