@@ -424,6 +424,33 @@ For rootless: `systemctl --user enable --now docker`.
   without a `--filesystem` hole that defeats the point of the sandbox. Plain
   `cargo build --release` plus a `.desktop` file is the target.
 
+### Versioning and releases
+
+SemVer, kept in `Cargo.toml` (the About dialog shows it via
+`CARGO_PKG_VERSION`). Between releases `main` carries a **`-dev` pre-release** —
+e.g. `0.2.0-dev` — which sorts *below* the eventual `0.2.0` and makes an
+unreleased build identify as work toward the next version rather than
+masquerading as the last release. Tags are **annotated** `vX.Y.Z` (`git tag -a`,
+not lightweight); `v0.1.0` established the convention.
+
+Cutting `vX.Y.0`:
+
+1. Drop the `-dev` suffix (`X.Y.0-dev` → `X.Y.0`) in `Cargo.toml`, and run any
+   `cargo` command so `Cargo.lock` picks it up. `chore:` commit, via a PR —
+   branch off `main`, never commit the bump to the default branch directly.
+2. Verify the exact commit that will be tagged: `cargo clippy --all-targets --
+   -D warnings`, `cargo test`, and `cargo build --release`, all clean. A release
+   points at a buildable state, not just a passing debug build.
+3. Tag `vX.Y.0` (annotated) on the merged commit and push it.
+4. `gh release create vX.Y.0` from the tag, `--latest`. Notes describe the
+   feature set, not a PR-by-PR changelog. Embed screenshots with URLs pinned to
+   the tag (`raw.githubusercontent.com/…/vX.Y.0/docs/screenshots/…`) so they
+   never drift as the branch moves on. Releases are source-only: a
+   dynamically-linked GTK binary isn't portable across distros (same reasoning
+   as the Flatpak note above).
+5. Reopen the cycle: bump `main` to the next `X.(Y+1).0-dev` in another `chore:`
+   PR.
+
 ## When you're unsure
 
 Ask before: adding a dependency, introducing a new module, or deviating from the
