@@ -12,6 +12,7 @@
   <img src="https://img.shields.io/badge/Rust-2024-CE422B?logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/GTK4-libadwaita-4A90D9?logo=gnome&logoColor=white" alt="GTK4 + libadwaita">
   <img src="https://img.shields.io/badge/platform-Linux%20%2F%20GNOME-303030" alt="Platform: Linux / GNOME">
+  <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later">
   <img src="https://img.shields.io/badge/status-v1-2ea043" alt="Status: v1">
 </p>
 
@@ -144,4 +145,14 @@ parity with Docker Desktop.
 
 ## License
 
-Not yet licensed — a personal project. Please ask before reusing.
+Dockyard is free software, licensed under the **GNU General Public License v3.0
+or later** (GPL-3.0-or-later).
+
+You can redistribute it and/or modify it under the terms of the GPL as published
+by the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. It is distributed in the hope that it will be useful,
+but **without any warranty** — without even the implied warranty of
+merchantability or fitness for a particular purpose. See the [COPYING](COPYING)
+file for the full license text, or <https://www.gnu.org/licenses/gpl-3.0.html>.
+
+Copyright © 2026 Miguel Rincon.

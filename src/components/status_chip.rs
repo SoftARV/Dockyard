@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Shared status-chip mapping.
 //!
 //! The `.status-chip` CSS (the pill shape and per-variant colours) lives in

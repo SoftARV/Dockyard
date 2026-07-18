@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //! Socket discovery and thin async wrappers around bollard.
 //!
 //! Everything that knows a socket path lives here (CLAUDE.md rule 2).
