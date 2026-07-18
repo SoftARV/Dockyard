@@ -4,6 +4,7 @@
 mod app;
 mod components;
 mod docker;
+mod settings;
 
 use relm4::RelmApp;
 use relm4::gtk;
@@ -27,7 +28,13 @@ fn main() {
     // The chip's stylesheet lives with the chip; install it once now that GTK is
     // up. It's the app's only custom CSS.
     components::status_chip::install_css();
-    app.run::<app::AppModel>(());
+
+    // Load persisted settings and apply the theme before the window is shown, so
+    // there's no flash of the wrong colour scheme. The model owns them from here
+    // (for the Preferences dialog, and to seed each log panel's defaults).
+    let settings = settings::Settings::load();
+    settings.apply_theme();
+    app.run::<app::AppModel>(settings);
 }
 
 /// Point GTK at our icon and name it as the default.

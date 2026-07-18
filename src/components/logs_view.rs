@@ -36,6 +36,10 @@ const TIMESTAMP_DIM: f32 = 0.55;
 pub struct LogsInit {
     pub docker: Docker,
     pub id: String,
+    /// Initial toggle states, from the global settings. The per-view menu still
+    /// overrides them for this session.
+    pub wrap: bool,
+    pub timestamps: bool,
 }
 
 pub struct LogsView {
@@ -129,7 +133,7 @@ impl Component for LogsView {
 
                             gtk::CheckButton {
                                 set_label: Some("Wrap long lines"),
-                                set_active: true,
+                                set_active: init_wrap,
                                 connect_toggled[sender] => move |check| {
                                     sender.input(LogsInput::SetWrap(check.is_active()));
                                 },
@@ -137,7 +141,7 @@ impl Component for LogsView {
 
                             gtk::CheckButton {
                                 set_label: Some("Show timestamps"),
-                                set_active: false,
+                                set_active: show_timestamps,
                                 connect_toggled[sender] => move |check| {
                                     sender.input(LogsInput::SetTimestamps(check.is_active()));
                                 },
@@ -185,12 +189,18 @@ impl Component for LogsView {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        // The global defaults seed the initial state (the per-view menu overrides
+        // them). Copied out before `init` is partly moved into the model, and so
+        // the `view!` checkboxes can reference them.
+        let init_wrap = init.wrap;
+        let show_timestamps = init.timestamps;
+
         let view = gtk::TextView::new();
-        // Timestamps start hidden (off by default). Colour is set on realize
-        // from the theme, below.
+        // Timestamps are always inserted; this tag hides them unless enabled.
+        // Colour is set on realize from the theme, below.
         let ts_tag = gtk::TextTag::builder()
             .name("timestamp")
-            .invisible(true)
+            .invisible(!show_timestamps)
             .build();
         view.buffer().tag_table().add(&ts_tag);
 
@@ -208,7 +218,7 @@ impl Component for LogsView {
             docker: init.docker,
             id: init.id,
             streaming: false,
-            wrap: true,
+            wrap: init_wrap,
             follow: true,
             view: view.clone(),
             ts_tag,
