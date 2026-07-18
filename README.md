@@ -28,6 +28,21 @@ Built with [relm4](https://relm4.org/) (the Elm architecture, in Rust),
 [GTK 4](https://www.gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/),
 and [bollard](https://docs.rs/bollard/) for the Docker API.
 
+## Screenshots
+
+Every container, running or stopped, with its status, ports, and one-tap start/stop:
+
+<p align="center">
+  <img src="docs/screenshots/list.png" width="560" alt="Dockyard's container list, showing running, exited, and created containers with status chips and action buttons">
+</p>
+
+Open one for the detail dashboard — live CPU and memory graphs, its details and
+ports, and streaming logs, in a layout that goes side-by-side as the window widens:
+
+<p align="center">
+  <img src="docs/screenshots/detail.png" width="900" alt="Dockyard's container detail view: status, uptime, CPU and memory sparklines, details, ports, and a live log panel">
+</p>
+
 ## Features
 
 - **Container list** — running *and* stopped, each an Adwaita row with name,
