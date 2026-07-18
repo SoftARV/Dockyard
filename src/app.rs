@@ -29,6 +29,7 @@ use crate::components::container_row::{
 };
 use crate::docker::client;
 use crate::docker::types::Container;
+use crate::settings::{Settings, Theme};
 
 const POLL_INTERVAL_SECS: u32 = 2;
 
@@ -43,6 +44,7 @@ relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
 // No menu item — the header toggle button is search's visible affordance — but
 // the action still has to exist so the Ctrl+F accelerator has something to fire.
 relm4::new_stateless_action!(SearchAction, AppMenuActionGroup, "search");
+relm4::new_stateless_action!(PreferencesAction, AppMenuActionGroup, "preferences");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -99,6 +101,10 @@ pub struct AppModel {
     /// when `docker` was `None`. A menu item's enabled state can't be `#[watch]`ed
     /// from `view!`, so we toggle the `GAction` imperatively instead.
     refresh_action: gio::SimpleAction,
+    /// Persisted global settings. Loaded before the app ran and handed in; the
+    /// Preferences dialog edits them, and each new detail page reads the log
+    /// defaults from here.
+    settings: Settings,
 }
 
 #[derive(Debug)]
@@ -121,6 +127,13 @@ pub enum AppMsg {
     SearchChanged(String),
     /// Open the About dialog (from the primary menu).
     ShowAbout,
+    /// Open the Preferences dialog (from the primary menu).
+    ShowPreferences,
+    /// A setting changed in the Preferences dialog. Each updates the model's
+    /// `settings` and persists it; the theme one also applies immediately.
+    SetLogsWrap(bool),
+    SetLogsTimestamps(bool),
+    SetTheme(Theme),
     /// The detail page was popped — back button, Escape, swipe. Drops its
     /// controller, which stops the streams it owns (stats and logs).
     PageClosed,
@@ -378,7 +391,7 @@ impl AppModel {
 
 #[relm4::component(pub)]
 impl Component for AppModel {
-    type Init = ();
+    type Init = Settings;
     type Input = AppMsg;
     type Output = ();
     type CommandOutput = CommandMsg;
@@ -545,6 +558,7 @@ impl Component for AppModel {
                 "Refresh" => RefreshAction,
             },
             section! {
+                "Preferences" => PreferencesAction,
                 "About Dockyard" => AboutAction,
                 "Quit" => QuitAction,
             }
@@ -552,7 +566,7 @@ impl Component for AppModel {
     }
 
     fn init(
-        _init: Self::Init,
+        settings: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
@@ -591,6 +605,7 @@ impl Component for AppModel {
             detail_id: None,
             toast_overlay: adw::ToastOverlay::new(),
             refresh_action: refresh_action.gio_action().clone(),
+            settings,
         };
 
         let toast_overlay = model.toast_overlay.clone();
@@ -660,6 +675,12 @@ impl Component for AppModel {
         let about_action: RelmAction<AboutAction> = RelmAction::new_stateless(move |_| {
             about_sender.send(AppMsg::ShowAbout).ok();
         });
+        // Like About, a thin bridge: the dialog is built in the reducer.
+        let prefs_sender = sender.input_sender().clone();
+        let preferences_action: RelmAction<PreferencesAction> =
+            RelmAction::new_stateless(move |_| {
+                prefs_sender.send(AppMsg::ShowPreferences).ok();
+            });
         // Quit doesn't touch the model, so it acts directly rather than posting a
         // message like the others — it just tells the application to quit, which
         // closes the window.
@@ -677,6 +698,7 @@ impl Component for AppModel {
         let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
         menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
+        menu_actions.add_action(preferences_action);
         menu_actions.add_action(quit_action);
         menu_actions.add_action(search_action);
         menu_actions.register_for_widget(&root);
@@ -686,6 +708,7 @@ impl Component for AppModel {
         app.set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
         app.set_accelerators_for_action::<QuitAction>(&["<primary>q"]);
         app.set_accelerators_for_action::<SearchAction>(&["<primary>f"]);
+        app.set_accelerators_for_action::<PreferencesAction>(&["<primary>comma"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -770,6 +793,102 @@ impl Component for AppModel {
                 about.present(Some(root));
             }
 
+            AppMsg::ShowPreferences => {
+                // Built here like About, but its rows are interactive: each is
+                // seeded from the current settings, then wired to a message so the
+                // reducer owns the change (update the model, persist, apply). The
+                // rows' initial values are set at build time, before the signals
+                // are connected, so seeding them doesn't fire a spurious save.
+                let dialog = adw::PreferencesDialog::new();
+                let page = adw::PreferencesPage::new();
+
+                let logs = adw::PreferencesGroup::builder().title("Logs").build();
+
+                let wrap_row = adw::SwitchRow::builder()
+                    .title("Wrap long lines")
+                    .subtitle("Default for new log panels")
+                    .active(self.settings.logs_wrap)
+                    .build();
+                let wrap_sender = sender.input_sender().clone();
+                wrap_row.connect_active_notify(move |row| {
+                    wrap_sender.send(AppMsg::SetLogsWrap(row.is_active())).ok();
+                });
+
+                let ts_row = adw::SwitchRow::builder()
+                    .title("Show timestamps")
+                    .subtitle("Default for new log panels")
+                    .active(self.settings.logs_timestamps)
+                    .build();
+                let ts_sender = sender.input_sender().clone();
+                ts_row.connect_active_notify(move |row| {
+                    ts_sender
+                        .send(AppMsg::SetLogsTimestamps(row.is_active()))
+                        .ok();
+                });
+
+                logs.add(&wrap_row);
+                logs.add(&ts_row);
+
+                let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
+                let theme_row = adw::ActionRow::builder().title("Theme").build();
+
+                // A segmented control: three linked toggle buttons acting as
+                // radios (System / Light / Dark), matched to `Theme` by index.
+                let segmented = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                segmented.add_css_class("linked");
+                segmented.set_valign(gtk::Align::Center);
+
+                let buttons: Vec<gtk::ToggleButton> = ["System", "Light", "Dark"]
+                    .iter()
+                    .map(|&label| gtk::ToggleButton::with_label(label))
+                    .collect();
+                // Link them into one radio group, so exactly one stays active.
+                for button in &buttons[1..] {
+                    button.set_group(Some(&buttons[0]));
+                }
+                // Seed the current choice *before* connecting, so setting it
+                // doesn't fire the handler and spuriously re-save.
+                buttons[self.settings.theme.as_index() as usize].set_active(true);
+                for (index, button) in buttons.iter().enumerate() {
+                    let theme_sender = sender.input_sender().clone();
+                    button.connect_toggled(move |button| {
+                        // A radio toggle fires for both the newly-on and the
+                        // now-off button; only act on the one turning on.
+                        if button.is_active() {
+                            theme_sender
+                                .send(AppMsg::SetTheme(Theme::from_index(index as u32)))
+                                .ok();
+                        }
+                    });
+                    segmented.append(button);
+                }
+
+                theme_row.add_suffix(&segmented);
+                appearance.add(&theme_row);
+
+                // Appearance first — it's the most prominent, app-wide setting.
+                page.add(&appearance);
+                page.add(&logs);
+                dialog.add(&page);
+                dialog.present(Some(root));
+            }
+
+            AppMsg::SetLogsWrap(wrap) => {
+                self.settings.logs_wrap = wrap;
+                self.settings.save();
+            }
+
+            AppMsg::SetLogsTimestamps(show) => {
+                self.settings.logs_timestamps = show;
+                self.settings.save();
+            }
+
+            AppMsg::SetTheme(theme) => {
+                self.settings.theme = theme;
+                self.settings.save();
+                self.settings.apply_theme();
+            }
+
             AppMsg::ShowDetails(id) => {
                 let Some(docker) = self.docker.clone() else {
                     return;
@@ -782,6 +901,8 @@ impl Component for AppModel {
                     .launch(ContainerDetailInit {
                         docker,
                         container: container.container().clone(),
+                        logs_wrap: self.settings.logs_wrap,
+                        logs_timestamps: self.settings.logs_timestamps,
                     })
                     // The detail page's start/stop button emits an intent; the
                     // reducer dispatches it, same as a row.

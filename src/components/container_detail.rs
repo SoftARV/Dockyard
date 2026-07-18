@@ -41,6 +41,9 @@ pub struct ContainerDetailInit {
     pub docker: Docker,
     /// What the list already knows — shown at once, before `inspect` returns.
     pub container: Container,
+    /// Global log defaults, passed straight through to the embedded `LogsView`.
+    pub logs_wrap: bool,
+    pub logs_timestamps: bool,
 }
 
 /// A start/stop the user triggered from this page that's still in flight. Drives
@@ -427,6 +430,8 @@ impl Component for ContainerDetailPage {
             .launch(LogsInit {
                 docker: init.docker.clone(),
                 id: init.container.id.clone(),
+                wrap: init.logs_wrap,
+                timestamps: init.logs_timestamps,
             })
             .detach();
 
