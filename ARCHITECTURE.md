@@ -87,29 +87,37 @@ Where the analogy breaks, and it matters:
 
 ```
 src/
-  main.rs                     bootstrap: tracing, RelmApp, app ID, icon
-  app.rs                      root Component — the store + reducer + view
+  main.rs                     bootstrap: tracing, RelmApp, app ID, icon; loads settings,
+                              applies the theme, installs each component's CSS
+  app.rs                      root Component — the store + reducer + view; also search
+                              and the Preferences dialog
+  settings.rs                 persistent settings (glib::KeyFile, ~/.config/dockyard) + Theme
   docker/
     client.rs                 socket discovery, connect, ping, API wrappers
     types.rs                  our Container/ContainerState/Port/ContainerDetail/Stats
   components/
     container_row.rs          FactoryComponent -> adw::ActionRow
     container_detail.rs       Component -> responsive detail dashboard; embeds LogsView
-    logs_view.rs              Component -> embeddable Box, streaming log view
-    status_chip.rs            shared state -> chip label + colour-variant class
-main.rs also carries the one custom stylesheet (the .status-chip pill).
+    logs_view.rs              Component -> embeddable Box, streaming log view (fixed-dark terminal)
+    sparkline.rs              Component -> one live cairo sparkline; CPU and memory each embed one
+    status_chip.rs            shared WidgetTemplate (pill + dot) + state -> label/variant
 data/
   dev.miguelrincon.Dockyard.desktop    launcher entry
   icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
 Makefile                      make install -> ~/.local; make uninstall; make check
 ```
 
+There's no shared stylesheet module: each component that needs custom CSS owns it
+and exposes an `install_css` that `main` calls at startup (`status_chip` for the
+chip pill, `logs_view` for the terminal look). `main.rs` no longer holds CSS.
+
 The dependency direction is strictly one-way:
 
 ```
-main.rs  ->  app.rs  ->  components/container_row.rs
-                 \
-                  ->  docker/client.rs  ->  docker/types.rs  ->  [bollard]
+main.rs  ->  app.rs  ->  components/*   (detail -> logs_view + sparkline; row + detail -> status_chip)
+   \             \
+    \             ->  docker/client.rs  ->  docker/types.rs  ->  [bollard]
+     ->  settings.rs  <-  app.rs         (loaded by main, edited via the reducer)
 ```
 
 `components/` never imports `bollard`. That's the point of `docker/types.rs`.
@@ -448,12 +456,19 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 | `remove_container` isn't forced | Removing a running container should fail loudly rather than silently kill it. |
 | Sort by name | Docker returns newest-first; a list that reorders under your cursor every 2s is worse than a stable one. |
 | `tracing-subscriber` added | Not in CLAUDE.md's stack table, but `main.rs`'s job of "tracing init" is impossible without it. `env-filter` gives `RUST_LOG`. |
+| Settings in a keyfile, not GSettings | GSettings needs a compiled GSchema installed before `gio::Settings::new` works, which breaks `cargo run` on a fresh tree. `glib::KeyFile` behaves identically in dev and installed and adds no dependency; hand-writing three defaults is nothing. |
+| Theme override applies live, follow-system by default | `adw::StyleManager::set_color_scheme` on change, and once at startup before the window shows so there's no flash of the wrong scheme. |
+| Logs are a fixed dark terminal | A console reads best on a stable dark background, so the log panel deliberately ignores light/dark. The one place the app opts *out* of theming. |
+| CSS lives with the widget it styles | Each component installs its own stylesheet from `main` (`status_chip`, `logs_view`); there's no shared CSS module and `main.rs` carries none. |
+| The status chip is a `WidgetTemplate`, not a `Component` | It's stateless structure two screens drive with `#[watch]`. A template keeps that reactivity and embeds into the factory row without a per-row child controller; a `Component` would need message plumbing for every state change. |
 
 ---
 
 ## Status and timeline
 
-All dates 17 Jul 2026 — the app went from empty repo to working in one sitting.
+Dates 17–19 Jul 2026 — working v1 came together in one sitting (#1–#12); the
+detail dashboard and a run of polish (search, settings, the shared chip) followed
+over the next two days.
 
 ### Shipped
 
@@ -606,6 +621,67 @@ work still lands in the one reducer; only Quit acts directly
 connected" behaviour the model holds the `GAction` handle and flips it
 imperatively in the `Connected` handler — the same escape-hatch reasoning as the
 held `nav`/`toast_overlay` handles.
+
+**[#27] Search the container list** — a `system-search-symbolic` toggle on the
+header's left, a `gtk::SearchBar`, and Ctrl+F all reveal one live filter by name
+or image, entirely client-side (no extra Docker call). The model gained
+`all_containers` (the unfiltered set from the last poll) and `query`;
+`apply_containers` filters `all_containers` and reconciles, called both by the
+poll and by each keystroke, so a poll landing mid-search keeps status live. A
+third `adw::StatusPage` ("No Matches") distinguishes a filtered-empty list from
+having no containers at all. The header toggle is two-way-bound to the bar's
+`search-mode-enabled` via a `bind_property`, so the model keeps no "is search
+open" flag.
+
+**[#28] Wider default window, clamped list** — opens 900×720 so clicking a
+container lands on the detail page's wide (≥720px) layout rather than the narrow
+fallback; the list is wrapped in an `adw::Clamp` (max 600px) so its rows don't
+stretch across the wider window. Both are `view!` changes in `app.rs`.
+
+**[#29] Sparkline extracted, chip shared, start/stop feedback, header counts** — a
+polish pass, several threads:
+
+- The CPU/memory graph drawing moved out of the detail page into a reusable
+  `Sparkline` component (`components/sparkline.rs`), configured per graph with a
+  colour and an axis scale (CPU auto-scales to its peak, memory is fixed at 100%).
+  It repaints on resize now, which the inline version didn't.
+- The status chip became a shared `StatusChip` **`WidgetTemplate`** (a pill plus a
+  coloured dot) used by both the list and the detail page — a template rather than
+  a `Component` because the chip is stateless structure the parents drive with
+  `#[watch]`, which also lets it embed in the factory row without a per-row child
+  controller. Its stylesheet moved from `main.rs` into `status_chip.rs`
+  (`install_css`), setting the "CSS lives with the widget it styles" pattern.
+- **Transitional start/stop feedback.** The chip shows "Starting…"/"Stopping…"
+  (the list adds "Restarting…"/"Removing…") while an action is in flight, and the
+  detail page swaps its start/stop button for a spinner. `AppModel` forwards the
+  `ActionDone` result to the open detail page — matched by a new `detail_id` — so
+  the feedback clears on failure too, not only when a later inspect sees the
+  state flip. This is why `busy: HashSet<String>` became
+  `pending: HashMap<String, Action>`: the row has to know *which* verb to show.
+- The header title gained a live subtitle counting containers ("5 containers ·
+  3 running", of the full set), and the row subtitle dropped Docker's status
+  string — the chip already carries the state.
+
+**[#30] Preferences and persistent settings** — a **Preferences** item in the
+primary menu (Ctrl+,) opens an `adw::PreferencesDialog`: **Appearance** (a
+segmented System/Light/Dark theme control, applied live via `adw::StyleManager`)
+and **Logs** (the default wrap and timestamp toggles for new panels — each open
+panel's menu still overrides per session). Settings persist to
+`~/.config/dockyard/settings.ini` through `glib::KeyFile` (`settings.rs`), chosen
+over GSettings deliberately: GSettings needs a GSchema installed and compiled
+before the app will start, which breaks `cargo run`, whereas a keyfile behaves
+identically in dev and installed and adds no dependency (the cost is hand-writing
+three defaults). `main` loads the settings and applies the theme *before* the
+window shows (no flash), then hands them to `AppModel`, which threads the log
+defaults down through `ContainerDetailInit` into each new `LogsView`.
+
+The log panel also became a fixed-dark **terminal**, independent of the app
+theme — with a GTK CSS gotcha worth keeping: the text colour must be pinned on
+the `TextView`'s `textview` node, not just the outer class, because the theme
+sets that node's colour explicitly (`.view`) and a colour merely *inherited* from
+the ScrolledWindow loses to it. Background worked from the start (set on the
+`text` node) while colour didn't, which is exactly why light mode rendered
+black-on-dark until the `textview` node was named.
 
 ### How the app finds its own icon (and why Wayland is the twist)
 

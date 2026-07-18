@@ -152,8 +152,12 @@ crash. Use `anyhow::Result` internally.
 
 ```
 src/
-  main.rs              # RelmApp bootstrap, tracing init
-  app.rs               # root Component: AppModel, AppMsg, update, view
+  main.rs              # RelmApp bootstrap, tracing init; loads settings + applies theme;
+                       #   calls each component's CSS install
+  app.rs               # root Component: AppModel, AppMsg, update, view; search + the
+                       #   Preferences dialog live here
+  settings.rs          # persistent global settings via glib::KeyFile
+                       #   (~/.config/dockyard/settings.ini) + the Theme enum
   docker/
     mod.rs
     client.rs          # socket discovery, Docker handle, thin async wrappers
@@ -163,8 +167,11 @@ src/
     container_row.rs      # FactoryComponent -> adw::ActionRow
     container_detail.rs   # Component -> responsive detail dashboard (status/uptime/CPU/mem
                           #   cards, details, ports) that embeds a LogsView
-    logs_view.rs          # Component -> embeddable Box, streaming log view (lives in detail)
-    status_chip.rs        # shared: state -> chip label + colour-variant class
+    logs_view.rs          # Component -> embeddable Box, streaming log view; fixed-dark
+                          #   "terminal" look (owns its `.log-terminal` stylesheet)
+    sparkline.rs          # Component -> one live cairo sparkline; CPU and memory each embed one
+    status_chip.rs        # shared WidgetTemplate (the pill + dot) plus state -> label/variant;
+                          #   owns the `.status-chip` stylesheet
 data/
   dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
   icons/hicolor/{16x16,...,512x512,scalable}/apps/dev.miguelrincon.Dockyard.{png,svg}
@@ -190,12 +197,16 @@ The root model is roughly:
 ```rust
 struct AppModel {
     docker: Option<Docker>,          // None = not connected
-    containers: FactoryVecDeque<ContainerRow>,
+    containers: FactoryVecDeque<ContainerRow>,  // the *visible* (search-filtered) rows
+    all_containers: Vec<Container>,  // full set from the last poll; the filter reads this
+    query: String,                   // current search text ("" = no filter)
     state: ViewState,                // Loading | Ready | Disconnected(String)
-    busy: HashSet<String>,           // ids with an action in flight
+    pending: HashMap<String, Action>, // ids with an action in flight, and which one
     refreshing: bool,                // user-initiated refresh only
     poll: Option<glib::SourceId>,    // None while the window is hidden
+    settings: Settings,              // persisted; the Preferences dialog edits it
     toast_overlay: adw::ToastOverlay,
+    // also holds nav / detail / detail_id / refresh_action handles for imperative use
 }
 
 enum AppMsg {
@@ -207,7 +218,12 @@ enum AppMsg {
     Remove(String),                  // asks for confirmation
     RemoveConfirmed(String),         // actually removes
     ShowDetails(String),             // push the detail page (logs live inside it)
+    SearchChanged(String),           // live filter, one per keystroke
     ShowAbout,                       // open the About dialog (primary menu)
+    ShowPreferences,                 // open the Preferences dialog (primary menu)
+    SetLogsWrap(bool),               // Preferences edits: the two log defaults and
+    SetLogsTimestamps(bool),         //   the theme. Each persists to settings.ini;
+    SetTheme(Theme),                 //   SetTheme also applies the scheme immediately
     Error(String),
     SuspendedChanged(bool),          // window visible / not visible
 }
@@ -217,7 +233,9 @@ enum AppMsg {
 enum CommandMsg {
     Connected(Box<Result<Docker, String>>),
     ContainersLoaded(Vec<Container>),
-    ActionDone { id: String, result: Result<(), String> },
+    // `action` rides along so a failure can name the verb, and so an open detail
+    // page can be told its start/stop settled (to clear its transitional chip).
+    ActionDone { id: String, action: Action, result: Result<(), String> },
     ListFailed(String),
 }
 ```
@@ -231,11 +249,18 @@ distinct. Everything arriving in `update_cmd` came from a command.
 
 ## UI shape
 
-- `adw::ApplicationWindow` > `adw::ToolbarView` > `adw::HeaderBar`
+- `adw::ApplicationWindow` (opens 900×720) > `adw::ToolbarView` > `adw::HeaderBar`
+- The header bar's title is an `adw::WindowTitle` with a **live subtitle** — a
+  running count, e.g. "5 containers · 3 running" (of the full set, not the
+  filtered view). Its far left is a **search** toggle (`system-search-symbolic`);
+  it and **Ctrl+F** reveal a `gtk::SearchBar` under the header that filters the
+  list live by name or image (client-side, no extra Docker call). No matches
+  shows a third `adw::StatusPage`, distinct from the empty state.
 - The header bar's far right is the **primary menu** (the `open-menu-symbolic`
   hamburger): a real `gio::Menu` model built with relm4's `menu!` macro, whose
-  items are `GAction`s in a "win" group — **Refresh** (Ctrl+R / F5), **About**
-  (an `adw::AboutDialog`), and **Quit** (Ctrl+Q). Refresh greys out until
+  items are `GAction`s in a "win" group — **Refresh** (Ctrl+R / F5),
+  **Preferences** (Ctrl+,), **About** (an `adw::AboutDialog`), and **Quit**
+  (Ctrl+Q). Refresh greys out until
   connected (its `GAction` is enabled in the `Connected` handler, since a menu
   item's enabled state can't be `#[watch]`ed). Menu items *must* invoke actions,
   so this is the one place we use relm4's **actions** module rather than the
@@ -244,27 +269,50 @@ distinct. Everything arriving in `update_cmd` came from a command.
 - Main content: `adw::NavigationView`. Root page = container list; clicking a row
   pushes the detail page (a dashboard that embeds the streaming log view — there
   is no separate logs page).
-- Each container is an `adw::ActionRow`: title = name, subtitle = image + status,
-  a status-chip prefix, a start/stop button suffix, and a menu button for
-  restart/remove. The row is activatable — clicking it opens the detail page.
+- The list is clamped to ~600px (`adw::Clamp`) so rows stay readable in the wide
+  window rather than stretching edge to edge.
+- Each container is an `adw::ActionRow`: title = name, subtitle = image + ports
+  (deliberately no status text — the chip carries the state), a status-chip
+  prefix, a start/stop button suffix, and a menu button for restart/remove. The
+  row is activatable — clicking it opens the detail page.
+- **The status chip is a shared `StatusChip` `WidgetTemplate`** (a pill with a
+  coloured dot + label), used by both the row and the detail page. Its
+  `state → label/variant` mapping lives in `status_chip.rs`. While a start/stop
+  (or restart/remove) is in flight, the chip shows a neutral transitional label —
+  "Starting…", "Stopping…", … — on both screens; the detail page also swaps its
+  start/stop button for a spinner. `AppModel` forwards the action result to the
+  open detail page so its feedback clears on failure too, not just on a state
+  flip.
 - The detail page is responsive (`adw::BreakpointBin` at `min-width: 720px`): the
   four stat cards reflow from 2×2 to a single row of four (`gtk::FlowBox`), and the
   info column (details + ports) sits above the logs when narrow, beside them when
-  wide.
-- Empty state and disconnected state: `adw::StatusPage`.
+  wide. The CPU and memory cards each embed a `Sparkline` component.
+- The embedded log panel is a fixed-dark **terminal** — its own `.log-terminal`
+  stylesheet forces a dark background and light text regardless of the app theme.
+- **Preferences** is an `adw::PreferencesDialog` with two groups: **Appearance**
+  (a segmented System/Light/Dark theme control, applied live via
+  `adw::StyleManager`) and **Logs** (the default wrap and timestamp toggles for
+  new log panels). Its values persist through `settings.rs`.
+- Empty, no-results, and disconnected states: `adw::StatusPage`.
 - Errors: `adw::ToastOverlay` wrapping the content.
 - **Use libadwaita widgets, not raw GTK equivalents.** `adw::ActionRow` over a
   hand-built `gtk::Box`; `adw::PreferencesGroup` over a labelled frame. That's
   where the native feel comes from — accent colour, dark mode, and adaptive
   layout are then free.
 - No custom CSS unless there is no libadwaita widget for the job. If you think
-  you need custom CSS, say why first. **One exception exists so far**: the
-  `.status-chip` pill in `components/status_chip.rs` (`install_css`, called once
-  from `main`), because libadwaita has no
-  chip/badge widget — its `.badge` is the view-switcher bubble, and the colour
-  classes only tint text. It's tonal (a tint of the state colour behind matching
-  text) and uses Adwaita's own named colours, so it follows the theme. Add to
-  this stylesheet only when there's genuinely no widget for the job.
+  you need custom CSS, say why first. Each component that needs CSS owns it and
+  installs it from `main` via its own `install_css` (there's no shared stylesheet
+  module). **Two exceptions exist so far**:
+  - The `.status-chip` pill in `components/status_chip.rs`, because libadwaita
+    has no chip/badge widget — its `.badge` is the view-switcher bubble, and the
+    colour classes only tint text. It's tonal (a tint of the state colour behind
+    matching text) and uses Adwaita's own named colours, so it follows the theme.
+  - The `.log-terminal` look in `components/logs_view.rs`, which *deliberately*
+    ignores the theme: a fixed dark background and light text so logs read like a
+    console in either light or dark mode. Note the colours are pinned on the
+    `TextView`'s `textview` node, not just inherited — the theme sets that node's
+    colour explicitly, and an inherited value loses to it (light mode gave
+    black-on-dark until this was fixed).
 
 ## Refresh strategy
 
@@ -307,6 +355,16 @@ laid out responsively. Note `resource graphs` appears in the "stay lean" list
 below; they were built anyway because they're genuinely useful here, which is
 exactly the "flag the drift, then build it if it helps" posture that list now
 takes.
+
+Since then, a run of small, in-scope refinements (all merged): a header **search**
+that filters the list by name/image (#27); a wider default window with a clamped
+list (#28); the CPU/memory graph extracted into a reusable `Sparkline`, a header
+container count, transitional start/stop **feedback** on the chip, and the chip
+itself pulled into a shared `StatusChip` widget (#29); and a **Preferences**
+dialog with persisted settings — the two log defaults plus a light/dark/system
+theme override — backed by a `glib::KeyFile` config file, along with the
+fixed-dark terminal log look (#30). None of these are Docker-Desktop drift; they
+polish what's already there.
 
 **A reminder to stay lean, not a hard ban** (revised — was "explicitly out of
 scope"): image builds, `docker compose`, volumes, networks, registries, `exec`
