@@ -88,13 +88,13 @@ impl ContainerRow {
         &self.container
     }
 
-    /// "postgres:17-alpine · Up 39 minutes (healthy) · 5432:5432"
+    /// "postgres:17-alpine · 5432:5432"
+    ///
+    /// Deliberately no status text: uptime and health ("Up 39 minutes
+    /// (healthy)") add noise, and the running/exited state is already shown by
+    /// the status chip on the left. Image and published ports are what's left.
     fn subtitle(&self) -> String {
         let mut parts = vec![self.container.image.clone()];
-
-        if !self.container.status.is_empty() {
-            parts.push(self.container.status.clone());
-        }
 
         if !self.container.ports.is_empty() {
             let ports = self
