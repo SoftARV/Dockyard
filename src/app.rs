@@ -8,10 +8,10 @@
 use std::collections::HashSet;
 
 use bollard::Docker;
-use relm4::actions::{RelmAction, RelmActionGroup};
+use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
 use relm4::factory::FactoryVecDeque;
-use relm4::gtk::glib;
+use relm4::gtk::{gio, glib};
 use relm4::{
     Component, ComponentController, ComponentParts, ComponentSender, Controller, RelmWidgetExt,
     adw, gtk,
@@ -32,6 +32,7 @@ const POLL_INTERVAL_SECS: u32 = 2;
 // qualified: `win.about`). The group is registered on the window in `init`,
 // where the callback bridges the action to an `AppMsg`.
 relm4::new_action_group!(AppMenuActionGroup, "win");
+relm4::new_stateless_action!(RefreshAction, AppMenuActionGroup, "refresh");
 relm4::new_stateless_action!(AboutAction, AppMenuActionGroup, "about");
 
 #[derive(Debug)]
@@ -71,6 +72,11 @@ pub struct AppModel {
     /// standard relm4 escape hatch for widgets that are commanded rather than
     /// declared.
     toast_overlay: adw::ToastOverlay,
+    /// The primary menu's "Refresh" action, held so it can be greyed out until
+    /// we're connected — the same reason the old refresh button was disabled
+    /// when `docker` was `None`. A menu item's enabled state can't be `#[watch]`ed
+    /// from `view!`, so we toggle the `GAction` imperatively instead.
+    refresh_action: gio::SimpleAction,
 }
 
 #[derive(Debug)]
@@ -268,20 +274,11 @@ impl Component for AppModel {
                                     set_menu_model: Some(&primary_menu),
                                 },
 
-                                pack_end = &gtk::Button {
-                                    set_icon_name: "view-refresh-symbolic",
-                                    set_tooltip_text: Some("Refresh"),
-                                    #[watch]
-                                    set_visible: !model.refreshing,
-                                    #[watch]
-                                    set_sensitive: model.docker.is_some(),
-                                    connect_clicked => AppMsg::ManualRefresh,
-                                },
-
-                                // Only ever shown for a refresh the user asked
-                                // for. A local list call takes ~2ms so this
-                                // usually isn't seen — it earns its place when
-                                // the daemon is slow.
+                                // Refresh moved into the primary menu (with a
+                                // Ctrl+R / F5 accelerator); this spinner is the
+                                // header's remaining refresh feedback. A local
+                                // list takes ~2ms so it's usually unseen — it
+                                // earns its place when the daemon is slow.
                                 pack_end = &gtk::Spinner {
                                     #[watch]
                                     set_visible: model.refreshing,
@@ -355,7 +352,12 @@ impl Component for AppModel {
     // against the "win" group we register on the window in `init`.
     menu! {
         primary_menu: {
-            "About Dockyard" => AboutAction,
+            section! {
+                "Refresh" => RefreshAction,
+            },
+            section! {
+                "About Dockyard" => AboutAction,
+            }
         }
     }
 
@@ -375,6 +377,16 @@ impl Component for AppModel {
                 ContainerRowOutput::ShowDetails(id) => AppMsg::ShowDetails(id),
             });
 
+        // Build the Refresh action up front so its `GAction` handle can live in
+        // the model (to grey it out until connected). It's a thin bridge to
+        // `ManualRefresh`, like the About action. Starts disabled; enabled in the
+        // `Connected` handler.
+        let refresh_sender = sender.input_sender().clone();
+        let refresh_action: RelmAction<RefreshAction> = RelmAction::new_stateless(move |_| {
+            refresh_sender.send(AppMsg::ManualRefresh).ok();
+        });
+        refresh_action.set_enabled(false);
+
         let model = AppModel {
             docker: None,
             containers,
@@ -385,6 +397,7 @@ impl Component for AppModel {
             nav: adw::NavigationView::new(),
             detail: None,
             toast_overlay: adw::ToastOverlay::new(),
+            refresh_action: refresh_action.gio_action().clone(),
         };
 
         let toast_overlay = model.toast_overlay.clone();
@@ -409,8 +422,13 @@ impl Component for AppModel {
             about_sender.send(AppMsg::ShowAbout).ok();
         });
         let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
+        menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
         menu_actions.register_for_widget(&root);
+
+        // A common action deserves a shortcut; the menu shows it automatically.
+        relm4::main_application()
+            .set_accelerators_for_action::<RefreshAction>(&["<primary>r", "F5"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -558,6 +576,9 @@ impl Component for AppModel {
                 Ok(docker) => {
                     self.docker = Some(docker);
                     self.state = ViewState::Ready;
+                    // Now that there's a daemon to talk to, the menu's Refresh
+                    // item (and its Ctrl+R / F5 shortcut) becomes usable.
+                    self.refresh_action.set_enabled(true);
 
                     // GTK already knows whether the window is worth drawing;
                     // "suspended" covers minimised, fully obscured and
