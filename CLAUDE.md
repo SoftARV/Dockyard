@@ -43,21 +43,27 @@ Rust edition 2024. Plus `anyhow` 1 (rule 5) and `tracing-subscriber` 0.3 with
 `client.rs` and `logs_view.rs`). `tokio` is pinned but **not** used directly by
 our code — relm4 owns the tokio runtime — and may never be.
 
-Enable relm4's `libadwaita` **and `gnome_46`** features. Do **not** add `gtk4`
+Enable relm4's `libadwaita` **and `gnome_49`** features. Do **not** add `gtk4`
 or `libadwaita` as direct dependencies with independent versions — take them
 through relm4 so the versions can't drift apart.
 
-`gnome_46` is a floor on what users must have installed, not a free upgrade.
+`gnome_49` is a floor on what users must have installed, not a free upgrade.
 relm4's `gnome_*` features decide which libadwaita widgets exist at all:
 
 | relm4 feature | libadwaita | Notable |
 | --- | --- | --- |
 | `gnome_42` (default) | 1.0 | `ActionRow`, `StatusPage`, `Toast` |
 | `gnome_45` | 1.4 | `ToolbarView`, `NavigationView` |
-| **`gnome_46`** ← us | **1.5** | **`AlertDialog`** |
+| `gnome_46` | 1.5 | `AlertDialog` |
 | `gnome_47` | 1.6 | `MessageDialog` becomes deprecated |
+| **`gnome_49`** ← us | **1.8** | **`ShortcutsDialog`** (replaces the deprecated `GtkShortcutsWindow`) |
 
-Raise it only for a widget you actually need, and say so.
+Raise it only for a widget you actually need, and say so. We raised it from
+`gnome_46` to `gnome_49` for `adw::ShortcutsDialog`: `GtkShortcutsWindow` (the
+old keyboard-shortcuts overlay) is deprecated since GTK 4.18, and enabling any
+newer feature level makes it break `clippy -D warnings`. The bump changed no
+crate versions — relm4/gtk4/libadwaita already ship the `gnome_49` feature — it
+only moved the API surface and the install floor (GNOME 49, Sep 2025).
 
 **relm4 0.11's docs.rs build is broken** — the site only documents 0.10, and
 parts of it are wrong for us. Read the vendored source instead; it's the exact
@@ -259,7 +265,8 @@ distinct. Everything arriving in `update_cmd` came from a command.
 - The header bar's far right is the **primary menu** (the `open-menu-symbolic`
   hamburger): a real `gio::Menu` model built with relm4's `menu!` macro, whose
   items are `GAction`s in a "win" group — **Refresh** (Ctrl+R / F5),
-  **Preferences** (Ctrl+,), **About** (an `adw::AboutDialog`), and **Quit**
+  **Preferences** (Ctrl+,), **Keyboard Shortcuts** (Ctrl+?, an
+  `adw::ShortcutsDialog`), **About** (an `adw::AboutDialog`), and **Quit**
   (Ctrl+Q). Refresh greys out until
   connected (its `GAction` is enabled in the `Connected` handler, since a menu
   item's enabled state can't be `#[watch]`ed). Menu items *must* invoke actions,
@@ -396,7 +403,7 @@ sudo pacman -S --needed base-devel pkgconf rust gtk4 libadwaita librsvg
 ```
 
 Rust must be ≥ 1.93 (relm4 0.11's MSRV) — `cargo` refuses to build below it.
-libadwaita must be ≥ 1.5, for `adw::AlertDialog`.
+libadwaita must be ≥ 1.8 (GTK ≥ 4.20), for `adw::ShortcutsDialog`.
 
 The Docker daemon is socket-activated: `sudo systemctl enable --now docker.socket`.
 For rootless: `systemctl --user enable --now docker`.

@@ -67,6 +67,9 @@ ports, and streaming logs, in a layout that goes side-by-side as the window wide
 - **Preferences** — a settings dialog to pick the app theme (follow system /
   light / dark) and the default wrap and timestamp options for new log panels,
   saved to a small config file so they persist.
+- **Keyboard shortcuts** — a primary-menu item (or Ctrl+?) opens the standard
+  GNOME shortcuts overlay listing everything the app binds — Refresh, Search,
+  Preferences, and the rest.
 - **Native and adaptive** — libadwaita throughout, so light/dark mode, the
   system accent colour, and adaptive layout all come for free.
 - **Light on resources** — the two-second poll pauses entirely while the window
@@ -80,7 +83,7 @@ ports, and streaming logs, in a layout that goes side-by-side as the window wide
 ## Requirements
 
 - **Rust** ≥ 1.93 (edition 2024)
-- **GTK** ≥ 4.10 and **libadwaita** ≥ 1.5
+- **GTK** ≥ 4.20 and **libadwaita** ≥ 1.8
 - **librsvg** (for the icon)
 - A reachable **Docker daemon** — rootful or rootless
 

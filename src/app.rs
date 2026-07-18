@@ -45,6 +45,7 @@ relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
 // the action still has to exist so the Ctrl+F accelerator has something to fire.
 relm4::new_stateless_action!(SearchAction, AppMenuActionGroup, "search");
 relm4::new_stateless_action!(PreferencesAction, AppMenuActionGroup, "preferences");
+relm4::new_stateless_action!(ShortcutsAction, AppMenuActionGroup, "shortcuts");
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -129,6 +130,8 @@ pub enum AppMsg {
     ShowAbout,
     /// Open the Preferences dialog (from the primary menu).
     ShowPreferences,
+    /// Open the keyboard-shortcuts overlay (primary menu / Ctrl+?).
+    ShowShortcuts,
     /// A setting changed in the Preferences dialog. Each updates the model's
     /// `settings` and persists it; the theme one also applies immediately.
     SetLogsWrap(bool),
@@ -559,6 +562,7 @@ impl Component for AppModel {
             },
             section! {
                 "Preferences" => PreferencesAction,
+                "Keyboard Shortcuts" => ShortcutsAction,
                 "About Dockyard" => AboutAction,
                 "Quit" => QuitAction,
             }
@@ -681,6 +685,11 @@ impl Component for AppModel {
             RelmAction::new_stateless(move |_| {
                 prefs_sender.send(AppMsg::ShowPreferences).ok();
             });
+        // Same thin-bridge shape: the overlay is built in the reducer.
+        let shortcuts_sender = sender.input_sender().clone();
+        let shortcuts_action: RelmAction<ShortcutsAction> = RelmAction::new_stateless(move |_| {
+            shortcuts_sender.send(AppMsg::ShowShortcuts).ok();
+        });
         // Quit doesn't touch the model, so it acts directly rather than posting a
         // message like the others — it just tells the application to quit, which
         // closes the window.
@@ -699,6 +708,7 @@ impl Component for AppModel {
         menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
         menu_actions.add_action(preferences_action);
+        menu_actions.add_action(shortcuts_action);
         menu_actions.add_action(quit_action);
         menu_actions.add_action(search_action);
         menu_actions.register_for_widget(&root);
@@ -709,6 +719,8 @@ impl Component for AppModel {
         app.set_accelerators_for_action::<QuitAction>(&["<primary>q"]);
         app.set_accelerators_for_action::<SearchAction>(&["<primary>f"]);
         app.set_accelerators_for_action::<PreferencesAction>(&["<primary>comma"]);
+        // Ctrl+? is GNOME's standard shortcut for the shortcuts overlay itself.
+        app.set_accelerators_for_action::<ShortcutsAction>(&["<primary>question"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
         sender.oneshot_command(async {
@@ -870,6 +882,43 @@ impl Component for AppModel {
                 page.add(&appearance);
                 page.add(&logs);
                 dialog.add(&page);
+                dialog.present(Some(root));
+            }
+
+            AppMsg::ShowShortcuts => {
+                // `adw::ShortcutsDialog` (libadwaita 1.8+) is the modern,
+                // non-deprecated replacement for `GtkShortcutsWindow`. Its win
+                // over the old widget: it's built imperatively — titled sections
+                // of items — so there's no UI-description blob, and it reads like
+                // the rest of the app. It presents as an `adw::Dialog`, exactly
+                // like About and Preferences, and manages its own lifetime, so
+                // there's nothing to store.
+                //
+                // The accelerators here are typed out rather than derived from
+                // the actions (`ShortcutsItem::from_action` can do that) so the
+                // list is self-contained and doesn't depend on the app's accel
+                // map being resolvable at build time. They mirror what `init`
+                // registers — plus Escape, which `AdwNavigationView` gives us.
+                let dialog = adw::ShortcutsDialog::new();
+
+                let general = adw::ShortcutsSection::new(Some("General"));
+                general.add(adw::ShortcutsItem::new("Refresh", "<Control>r F5"));
+                general.add(adw::ShortcutsItem::new("Search", "<Control>f"));
+                dialog.add(general);
+
+                let navigation = adw::ShortcutsSection::new(Some("Navigation"));
+                navigation.add(adw::ShortcutsItem::new("Go back", "Escape"));
+                dialog.add(navigation);
+
+                let application = adw::ShortcutsSection::new(Some("Application"));
+                application.add(adw::ShortcutsItem::new("Preferences", "<Control>comma"));
+                application.add(adw::ShortcutsItem::new(
+                    "Keyboard Shortcuts",
+                    "<Control>question",
+                ));
+                application.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
+                dialog.add(application);
+
                 dialog.present(Some(root));
             }
 
