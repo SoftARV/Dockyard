@@ -200,13 +200,14 @@ struct AppModel {
 
 enum AppMsg {
     Refresh,                         // the 2s poll; silent
-    ManualRefresh,                   // the button; shows a spinner
+    ManualRefresh,                   // the menu's Refresh item / Ctrl+R; spins
     Start(String),                   // container id
     Stop(String),
     Restart(String),
     Remove(String),                  // asks for confirmation
     RemoveConfirmed(String),         // actually removes
     ShowDetails(String),             // push the detail page (logs live inside it)
+    ShowAbout,                       // open the About dialog (primary menu)
     Error(String),
     SuspendedChanged(bool),          // window visible / not visible
 }
@@ -231,6 +232,15 @@ distinct. Everything arriving in `update_cmd` came from a command.
 ## UI shape
 
 - `adw::ApplicationWindow` > `adw::ToolbarView` > `adw::HeaderBar`
+- The header bar's far right is the **primary menu** (the `open-menu-symbolic`
+  hamburger): a real `gio::Menu` model built with relm4's `menu!` macro, whose
+  items are `GAction`s in a "win" group — **Refresh** (Ctrl+R / F5), **About**
+  (an `adw::AboutDialog`), and **Quit** (Ctrl+Q). Refresh greys out until
+  connected (its `GAction` is enabled in the `Connected` handler, since a menu
+  item's enabled state can't be `#[watch]`ed). Menu items *must* invoke actions,
+  so this is the one place we use relm4's **actions** module rather than the
+  message reducer — each action is a thin bridge that posts an `AppMsg` (except
+  Quit, which acts directly). Contrast the row's `⋮`, still a hand-built popover.
 - Main content: `adw::NavigationView`. Root page = container list; clicking a row
   pushes the detail page (a dashboard that embeds the streaming log view — there
   is no separate logs page).
@@ -336,6 +346,10 @@ For rootless: `systemctl --user enable --now docker`.
 
 - `cargo clippy --all-targets -- -D warnings` is the bar, not `cargo build`.
 - Commits: conventional commits (`feat:`, `fix:`, `refactor:`).
+- **Licence: GPL-3.0-or-later.** Full text in `COPYING`; declared in
+  `Cargo.toml`. Every source file carries the two-line SPDX header
+  (`SPDX-FileCopyrightText` + `SPDX-License-Identifier: GPL-3.0-or-later`) — new
+  `.rs` files get it too.
 - App ID: `dev.miguelrincon.Dockyard`. It must match the `.desktop` file name,
   the GResource prefix (`/dev/miguelrincon/Dockyard/`), and `RelmApp::new()`.
   The app is called **Dockyard** — use that in the window title and `.desktop`
