@@ -49,8 +49,6 @@ ports, and streaming logs, in a layout that goes side-by-side as the window wide
 - **Container list** — running *and* stopped, each an Adwaita row with name,
   image, a colour-coded status chip, and published ports; a running count sits in
   the header. Refreshes itself every two seconds.
-- **Search** — a header search button (or Ctrl+F) filters the list live by name
-  or image, entirely client-side.
 - **Lifecycle actions** — start, stop, restart, and remove (with a confirmation
   dialog). Each shows inline progress — the status chip turns to "Starting…" /
   "Stopping…" while the action runs — and surfaces failures as toasts, never a
@@ -64,12 +62,6 @@ ports, and streaming logs, in a layout that goes side-by-side as the window wide
   detail view in a fixed-dark terminal panel, with a wrap toggle and an optional
   timestamp column. Follows the tail as new lines arrive, but doesn't yank the
   view while you scroll back.
-- **Preferences** — a settings dialog to pick the app theme (follow system /
-  light / dark) and the default wrap and timestamp options for new log panels,
-  saved to a small config file so they persist.
-- **Keyboard shortcuts** — a primary-menu item (or Ctrl+?) opens the standard
-  GNOME shortcuts overlay listing everything the app binds — Refresh, Search,
-  Preferences, and the rest.
 - **Native and adaptive** — libadwaita throughout, so light/dark mode, the
   system accent colour, and adaptive layout all come for free.
 - **Light on resources** — the two-second poll pauses entirely while the window
