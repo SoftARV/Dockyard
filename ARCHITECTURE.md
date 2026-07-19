@@ -807,9 +807,15 @@ of it. The two log-view polish items once listed here — the timestamp toggle
 resetting the scroll position, and the fixed-grey timestamp colour — were both
 resolved in #13 (invisible-tag toggle, theme-adaptive colour).
 
-No committed next feature. Candidates, only if they earn their keep on this one
-machine: `docker.events()` to replace polling (below), or surfacing container
-health beyond "running" (see "Known rough edges").
+**0.2.0 is being planned around three features — Podman support, creating
+containers, and editing them.** The detailed design (verified bollard APIs,
+module sketches, the `ContainerSpec`↔bollard mappings, the immutability
+constraint that makes "edit" a recreate, and the M1–M4 milestones) lives in
+[`docs/design/0.2-create-edit-podman.md`](docs/design/0.2-create-edit-podman.md).
+
+Other candidates, only if they earn their keep on this one machine:
+`docker.events()` to replace polling (below), or surfacing container health
+beyond "running" (see "Known rough edges").
 
 ### Later, deliberately (v2)
 
