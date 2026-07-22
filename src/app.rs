@@ -27,7 +27,7 @@ use crate::components::container_detail::{
 use crate::components::container_row::{
     ContainerRow, ContainerRowInit, ContainerRowInput, ContainerRowOutput, RowPending,
 };
-use crate::docker::client;
+use crate::docker::client::{self, Connection, Runtime, RuntimePreference};
 use crate::docker::types::Container;
 use crate::settings::{Settings, Theme};
 
@@ -46,6 +46,13 @@ relm4::new_stateless_action!(QuitAction, AppMenuActionGroup, "quit");
 relm4::new_stateless_action!(SearchAction, AppMenuActionGroup, "search");
 relm4::new_stateless_action!(PreferencesAction, AppMenuActionGroup, "preferences");
 relm4::new_stateless_action!(ShortcutsAction, AppMenuActionGroup, "shortcuts");
+// The runtime switcher — the first *stateful* action here; the others are all
+// stateless. A GAction with a string state and a string target is exactly how
+// GTK models a radio group: the menu renders one item per target and bullets
+// whichever equals the state. Both types are `String` because that's what the
+// menu item's target value serialises to, and `RuntimePreference::as_key` is
+// what produces them.
+relm4::new_stateful_action!(RuntimeAction, AppMenuActionGroup, "runtime", String, String);
 
 #[derive(Debug)]
 pub enum ViewState {
@@ -55,7 +62,14 @@ pub enum ViewState {
 }
 
 pub struct AppModel {
-    docker: Option<Docker>,
+    /// The live connection: the bollard handle plus which runtime is behind it.
+    /// `None` = not connected. Exactly one at a time — Docker and Podman have
+    /// independent namespaces, so a merged view would be a lie, and a second
+    /// poll would double the wakeup rate we go out of our way to keep low.
+    connection: Option<Connection>,
+    /// Which runtimes this machine offers. Drives whether the header shows a
+    /// switcher at all: with one there's no choice to make.
+    runtimes: Vec<Runtime>,
     containers: FactoryVecDeque<ContainerRow>,
     /// The full, unfiltered set from the last poll. The factory only holds the
     /// rows the search currently shows, so it can't double as the backing store;
@@ -132,6 +146,9 @@ pub enum AppMsg {
     ShowPreferences,
     /// Open the keyboard-shortcuts overlay (primary menu / Ctrl+?).
     ShowShortcuts,
+    /// The user picked a runtime from the header switcher. Persists the choice
+    /// and reconnects from scratch.
+    SetRuntime(RuntimePreference),
     /// A setting changed in the Preferences dialog. Each updates the model's
     /// `settings` and persists it; the theme one also applies immediately.
     SetLogsWrap(bool),
@@ -152,7 +169,7 @@ pub enum AppMsg {
 /// own channel — this is the `CommandOutput` associated type.
 #[derive(Debug)]
 pub enum CommandMsg {
-    Connected(Box<Result<Docker, String>>),
+    Connected(Box<Result<Connection, String>>),
     ContainersLoaded(Vec<Container>),
     /// A one-shot action finished. Carries the id so the right row can stop
     /// spinning — several containers can be mid-action at once — and the action
@@ -208,9 +225,60 @@ impl AppModel {
         self.toast_overlay.add_toast(adw::Toast::new(message));
     }
 
+    /// A handle to the connected daemon, if there is one.
+    ///
+    /// `Docker` is an `Arc`-backed handle, so this clone is a pointer bump —
+    /// and it's what the commands need: a future has to be `'static + Send`,
+    /// which a borrow of `self.connection` can't satisfy.
+    fn docker(&self) -> Option<Docker> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.docker.clone())
+    }
+
+    /// Connect (or reconnect) off-thread. Associated rather than a method
+    /// because `init` needs it before there's a model to call it on.
+    fn dispatch_connect(sender: &ComponentSender<Self>, pref: RuntimePreference) {
+        sender.oneshot_command(async move {
+            CommandMsg::Connected(Box::new(
+                client::connect(pref)
+                    .await
+                    .map_err(|err| format!("{err:#}")),
+            ))
+        });
+    }
+
+    /// The runtime switcher's label: what we're actually talking to once
+    /// connected, and what we're *trying* to talk to before that.
+    fn runtime_label(&self) -> &'static str {
+        match &self.connection {
+            Some(connection) => connection.runtime.label(),
+            None => self.settings.runtime.label(),
+        }
+    }
+
+    /// "Podman 6.0.1" once connected — the version is the part you can't get
+    /// from the label alone.
+    fn runtime_tooltip(&self) -> String {
+        match &self.connection {
+            Some(connection) => connection.describe(),
+            None => "Container runtime".to_owned(),
+        }
+    }
+
+    /// The disconnected page's title. Names the runtime the user asked for,
+    /// since "Docker isn't reachable" would be wrong on a Podman-only machine.
+    fn disconnected_title(&self) -> &'static str {
+        match self.settings.runtime {
+            RuntimePreference::Auto => "No container runtime is reachable",
+            RuntimePreference::Docker => "Docker isn't reachable",
+            RuntimePreference::Podman => "Podman isn't reachable",
+        }
+    }
+
     /// Fire a container action off-thread, spinning the row until it lands.
     fn dispatch(&mut self, sender: &ComponentSender<Self>, id: String, action: Action) {
-        let Some(docker) = self.docker.clone() else {
+        let Some(docker) = self.docker() else {
             return;
         };
 
@@ -243,7 +311,7 @@ impl AppModel {
     /// already going, and starting a second timer would double the work
     /// silently.
     fn start_poll(&mut self, sender: &ComponentSender<Self>) {
-        if self.poll.is_some() || self.docker.is_none() {
+        if self.poll.is_some() || self.connection.is_none() {
             return;
         }
 
@@ -440,6 +508,22 @@ impl Component for AppModel {
                                     set_tooltip_text: Some("Search"),
                                 },
 
+                                // The runtime switcher, next to search. Hidden
+                                // outright on a machine with only one runtime
+                                // — the overwhelmingly common case — so the
+                                // header stays exactly as it was before Podman
+                                // support existed. Its menu is a radio group
+                                // driven by the stateful `win.runtime` action.
+                                pack_start = &gtk::MenuButton {
+                                    #[watch]
+                                    set_visible: model.runtimes.len() > 1,
+                                    #[watch]
+                                    set_label: model.runtime_label(),
+                                    #[watch]
+                                    set_tooltip_text: Some(&model.runtime_tooltip()),
+                                    set_menu_model: Some(&runtime_menu),
+                                },
+
                                 // The primary menu — the GNOME hamburger. It's a
                                 // real menu model (a `gio::Menu`), not a hand-built
                                 // popover, so its items invoke `GAction`s and get
@@ -488,7 +572,8 @@ impl Component for AppModel {
 
                                 ViewState::Disconnected(reason) => adw::StatusPage {
                                     set_icon_name: Some("network-offline-symbolic"),
-                                    set_title: "Docker isn't reachable",
+                                    #[watch]
+                                    set_title: model.disconnected_title(),
                                     #[watch]
                                     set_description: Some(reason),
                                 },
@@ -566,6 +651,22 @@ impl Component for AppModel {
                 "About Dockyard" => AboutAction,
                 "Quit" => QuitAction,
             }
+        },
+
+        // The runtime switcher's menu, hung off the header chip. Each item
+        // carries a *target value* — the same string `RuntimePreference::as_key`
+        // persists — so the keys in the menu, the config file, and the action's
+        // state can't drift apart. GTK bullets whichever item matches the
+        // action's current state.
+        runtime_menu: {
+            section! {
+                RuntimePreference::Auto.label()
+                    => RuntimeAction(RuntimePreference::Auto.as_key().to_owned()),
+                RuntimePreference::Docker.label()
+                    => RuntimeAction(RuntimePreference::Docker.as_key().to_owned()),
+                RuntimePreference::Podman.label()
+                    => RuntimeAction(RuntimePreference::Podman.as_key().to_owned()),
+            }
         }
     }
 
@@ -596,7 +697,11 @@ impl Component for AppModel {
         refresh_action.set_enabled(false);
 
         let model = AppModel {
-            docker: None,
+            connection: None,
+            // A handful of `exists()` calls — cheap enough to do inline, and it
+            // has to be known before the first frame so the header doesn't grow
+            // a switcher a moment after opening.
+            runtimes: client::available_runtimes(),
             containers,
             all_containers: Vec::new(),
             query: String::new(),
@@ -635,6 +740,21 @@ impl Component for AppModel {
         let popped = sender.input_sender().clone();
         model.nav.connect_popped(move |_, _| {
             popped.send(AppMsg::PageClosed).ok();
+        });
+
+        // GTK already knows whether the window is worth drawing; "suspended"
+        // covers minimised, fully obscured and on-another-workspace. Let it
+        // decide when polling is pointless rather than guessing from focus.
+        //
+        // Connected here rather than once we're connected, because a runtime
+        // switch runs the connect path again and would otherwise stack a second
+        // handler on every switch. `start_poll` already no-ops while
+        // disconnected, so an early notification is harmless.
+        let suspended = sender.input_sender().clone();
+        root.connect_suspended_notify(move |window| {
+            suspended
+                .send(AppMsg::SuspendedChanged(window.is_suspended()))
+                .ok();
         });
 
         // Search bar wiring, here rather than in `view!` because it needs the
@@ -704,6 +824,21 @@ impl Component for AppModel {
         let search_action: RelmAction<SearchAction> = RelmAction::new_stateless(move |_| {
             search_button.set_active(!search_button.is_active());
         });
+        // The runtime switcher. Stateful, so the menu can render as a radio
+        // group: its state is the active preference's key and each item's
+        // target is the key it would set. Assigning `*state` is what moves the
+        // bullet — relm4's wrapper writes the state back after the callback —
+        // and the message is what actually reconnects.
+        let runtime_sender = sender.input_sender().clone();
+        let runtime_action: RelmAction<RuntimeAction> = RelmAction::new_stateful_with_target_value(
+            &model.settings.runtime.as_key().to_owned(),
+            move |_, state: &mut String, target: String| {
+                runtime_sender
+                    .send(AppMsg::SetRuntime(RuntimePreference::from_key(&target)))
+                    .ok();
+                *state = target;
+            },
+        );
         let mut menu_actions = RelmActionGroup::<AppMenuActionGroup>::new();
         menu_actions.add_action(refresh_action);
         menu_actions.add_action(about_action);
@@ -711,6 +846,7 @@ impl Component for AppModel {
         menu_actions.add_action(shortcuts_action);
         menu_actions.add_action(quit_action);
         menu_actions.add_action(search_action);
+        menu_actions.add_action(runtime_action);
         menu_actions.register_for_widget(&root);
 
         // Common actions deserve shortcuts; the menu shows them automatically.
@@ -723,11 +859,7 @@ impl Component for AppModel {
         app.set_accelerators_for_action::<ShortcutsAction>(&["<primary>question"]);
 
         // Connecting touches the network, so it can't happen inline in `init`.
-        sender.oneshot_command(async {
-            CommandMsg::Connected(Box::new(
-                client::connect().await.map_err(|err| format!("{err:#}")),
-            ))
-        });
+        Self::dispatch_connect(&sender, model.settings.runtime);
 
         ComponentParts { model, widgets }
     }
@@ -740,12 +872,9 @@ impl Component for AppModel {
             }
 
             AppMsg::Refresh => {
-                let Some(docker) = self.docker.clone() else {
+                let Some(docker) = self.docker() else {
                     return;
                 };
-                // `Docker` is an Arc-backed handle, so this clone is cheap and is
-                // the intended way to hand it to a task: the future must be
-                // 'static and Send, which borrowing `&self.docker` can't satisfy.
                 sender.oneshot_command(async move {
                     match client::list_containers(&docker).await {
                         Ok(containers) => CommandMsg::ContainersLoaded(containers),
@@ -801,6 +930,13 @@ impl Component for AppModel {
                     .issue_url("https://github.com/SoftARV/Dockyard/issues")
                     .license_type(gtk::License::Gpl30)
                     .copyright("© 2026 Miguel Rincon")
+                    // Which runtime is actually answering, and its version.
+                    // The header chip is hidden on a single-runtime machine, so
+                    // About is where that stays answerable regardless.
+                    .debug_info(match &self.connection {
+                        Some(connection) => format!("Runtime: {}", connection.describe()),
+                        None => "Runtime: not connected".to_owned(),
+                    })
                     .build();
                 about.present(Some(root));
             }
@@ -938,8 +1074,47 @@ impl Component for AppModel {
                 self.settings.apply_theme();
             }
 
+            // Switching runtimes is a full teardown and reconnect. Docker and
+            // Podman share nothing — not containers, not images, not ids — so
+            // every piece of state derived from the old one has to go before
+            // the new connection lands, or the UI would briefly show one
+            // runtime's containers under the other's name.
+            AppMsg::SetRuntime(pref) => {
+                if self.settings.runtime == pref {
+                    return;
+                }
+                debug!(runtime = pref.as_key(), "switching runtime");
+
+                self.settings.runtime = pref;
+                self.settings.save();
+
+                // Leave the detail page first: it holds a logs stream and a
+                // stats stream against the *old* daemon. Dropping the
+                // controller is what shuts both down — leaving them running
+                // would stream one runtime's output onto a page about a
+                // container that doesn't exist in the other.
+                if self.detail.is_some() {
+                    self.nav.pop();
+                }
+                self.detail = None;
+                self.detail_id = None;
+
+                self.stop_poll();
+                self.pending.clear();
+                self.all_containers.clear();
+                self.containers.guard().clear();
+
+                self.connection = None;
+                self.state = ViewState::Loading;
+                self.refresh_action.set_enabled(false);
+
+                // From here it's the ordinary startup path: `Connected`
+                // re-enables refresh, restarts the poll and refreshes.
+                Self::dispatch_connect(&sender, pref);
+            }
+
             AppMsg::ShowDetails(id) => {
-                let Some(docker) = self.docker.clone() else {
+                let Some(docker) = self.docker() else {
                     return;
                 };
                 let Some(container) = self.containers.iter().find(|row| row.id() == id) else {
@@ -1003,37 +1178,35 @@ impl Component for AppModel {
         &mut self,
         msg: Self::CommandOutput,
         sender: ComponentSender<Self>,
-        root: &Self::Root,
+        _root: &Self::Root,
     ) {
         match msg {
-            CommandMsg::Connected(result) => match *result {
-                Ok(docker) => {
-                    self.docker = Some(docker);
-                    self.state = ViewState::Ready;
-                    // Now that there's a daemon to talk to, the menu's Refresh
-                    // item (and its Ctrl+R / F5 shortcut) becomes usable.
-                    self.refresh_action.set_enabled(true);
+            CommandMsg::Connected(result) => {
+                // Re-check what's on the machine either way: a socket can appear
+                // or go between attempts, and it decides whether the switcher is
+                // shown — which is exactly what someone whose chosen runtime
+                // just failed needs in order to switch back.
+                self.runtimes = client::available_runtimes();
 
-                    // GTK already knows whether the window is worth drawing;
-                    // "suspended" covers minimised, fully obscured and
-                    // on-another-workspace. Let it decide when polling is
-                    // pointless rather than guessing from focus.
-                    let input = sender.input_sender().clone();
-                    root.connect_suspended_notify(move |window| {
-                        input
-                            .send(AppMsg::SuspendedChanged(window.is_suspended()))
-                            .ok();
-                    });
+                match *result {
+                    Ok(connection) => {
+                        debug!(runtime = connection.runtime.label(), "connected");
+                        self.connection = Some(connection);
+                        self.state = ViewState::Ready;
+                        // Now that there's a daemon to talk to, the menu's
+                        // Refresh item (and Ctrl+R / F5) becomes usable.
+                        self.refresh_action.set_enabled(true);
 
-                    // Phase 1 refresh strategy: dumb 2s poll. Events come later,
-                    // once this works end to end.
-                    self.start_poll(&sender);
-                    sender.input(AppMsg::Refresh);
+                        // Phase 1 refresh strategy: dumb 2s poll. Events come
+                        // later, once this works end to end.
+                        self.start_poll(&sender);
+                        sender.input(AppMsg::Refresh);
+                    }
+                    Err(reason) => {
+                        self.state = ViewState::Disconnected(reason);
+                    }
                 }
-                Err(reason) => {
-                    self.state = ViewState::Disconnected(reason);
-                }
-            },
+            }
 
             CommandMsg::ContainersLoaded(containers) => {
                 // Store the full set, then let `apply_containers` filter it by the

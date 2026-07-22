@@ -110,15 +110,36 @@ examples on the internet predate 0.19. If you emit a deprecated form and
 ### 2. Socket discovery — never hardcode `/var/run/docker.sock`
 
 The target machine may run rootless Docker, where the socket is at
-`$XDG_RUNTIME_DIR/docker.sock`. Resolution order:
+`$XDG_RUNTIME_DIR/docker.sock` — and it may run **Podman**, which has its own
+sockets. Resolution order, **runtime-major** (all of Docker, then all of Podman):
 
 1. `DOCKER_HOST` env var, if set
-2. `$XDG_RUNTIME_DIR/docker.sock`, if it exists
-3. `/var/run/docker.sock`
+2. Docker: `$XDG_RUNTIME_DIR/docker.sock`, then `/var/run/docker.sock`
+3. Podman: `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/podman/podman.sock`
+
+**The order is runtime-major on purpose, not scope-major.** On a machine with
+rootful Docker and rootless Podman — a common setup, and the dev machine's — a
+rootless-first order would match `podman.sock` before `/var/run/docker.sock` and
+silently switch runtimes: you'd open the app and your Docker containers would be
+gone.
+
+An explicit `RuntimePreference` (Auto/Docker/Podman, persisted) filters that
+list; `DOCKER_HOST` is skipped entirely for an explicit Podman preference, since
+picking a runtime in the UI is newer and more specific intent than an
+environment variable named after the other one.
 
 Put this in one function in `docker/client.rs`. If none resolve, the app must
-show an `adw::StatusPage` explaining that Docker isn't reachable — never panic,
+show an `adw::StatusPage` explaining that no runtime is reachable — never panic,
 never `.unwrap()` on the connection.
+
+**Which runtime answered is established by asking, never by the path.**
+`podman-docker` can put Podman behind `/var/run/docker.sock`, so the path proves
+nothing. After `ping()`, call `version()`: Podman lists a component named
+"Podman Engine" (Docker's is just "Engine"). The result rides in a `Connection
+{ docker, runtime, version }`, which is what `AppModel` holds instead of a bare
+`Docker`. Only ever **one connection at a time** — Docker and Podman have
+independent namespaces, so a merged view would be a lie, and a second poll would
+double the wakeup rate the app goes out of its way to keep low.
 
 Two things learned building this, both now in `client.rs`:
 
@@ -164,9 +185,11 @@ src/
                        #   Preferences dialog live here
   settings.rs          # persistent global settings via glib::KeyFile
                        #   (~/.config/dockyard/settings.ini) + the Theme enum
+                       #   and the persisted RuntimePreference
   docker/
     mod.rs
-    client.rs          # socket discovery, Docker handle, thin async wrappers
+    client.rs          # socket discovery (Docker + Podman), Runtime /
+                       #   RuntimePreference / Connection, thin async wrappers
     types.rs           # our Container / ContainerState / Port structs (+ tests)
   components/
     mod.rs
@@ -202,7 +225,8 @@ The root model is roughly:
 
 ```rust
 struct AppModel {
-    docker: Option<Docker>,          // None = not connected
+    connection: Option<Connection>,  // None = not connected; one runtime at a time
+    runtimes: Vec<Runtime>,          // what this machine offers; >1 shows the switcher
     containers: FactoryVecDeque<ContainerRow>,  // the *visible* (search-filtered) rows
     all_containers: Vec<Container>,  // full set from the last poll; the filter reads this
     query: String,                   // current search text ("" = no filter)
@@ -230,6 +254,8 @@ enum AppMsg {
     SetLogsWrap(bool),               // Preferences edits: the two log defaults and
     SetLogsTimestamps(bool),         //   the theme. Each persists to settings.ini;
     SetTheme(Theme),                 //   SetTheme also applies the scheme immediately
+    SetRuntime(RuntimePreference),   // persists, then tears everything down and
+                                     //   reconnects — see "Runtime switching"
     Error(String),
     SuspendedChanged(bool),          // window visible / not visible
 }
@@ -237,7 +263,7 @@ enum AppMsg {
 // Results landing back from off-thread work. relm4 gives commands their own
 // channel, so these are the `CommandOutput` type rather than `AppMsg`.
 enum CommandMsg {
-    Connected(Box<Result<Docker, String>>),
+    Connected(Box<Result<Connection, String>>),
     ContainersLoaded(Vec<Container>),
     // `action` rides along so a failure can name the verb, and so an open detail
     // page can be told its start/stop settled (to clear its transitional chip).
@@ -262,6 +288,22 @@ distinct. Everything arriving in `update_cmd` came from a command.
   it and **Ctrl+F** reveal a `gtk::SearchBar` under the header that filters the
   list live by name or image (client-side, no extra Docker call). No matches
   shows a third `adw::StatusPage`, distinct from the empty state.
+- Next to search sits the **runtime switcher**: a `gtk::MenuButton` labelled with
+  the connected runtime ("Docker" / "Podman"), tooltipped with its version. It is
+  **hidden entirely unless the machine offers more than one runtime**, so the
+  common single-runtime header looks exactly as it did before Podman support.
+  Its menu is a radio group driven by the **one stateful action** in the "win"
+  group (`win.runtime`, string state + string target, both being
+  `RuntimePreference::as_key`) — the other five actions are stateless. The active
+  runtime and version also show in the About dialog's debug info, which is where
+  they stay answerable when the switcher is hidden.
+
+**Runtime switching** (`AppMsg::SetRuntime`) is a full teardown and reconnect,
+in this order: persist the preference → pop and drop the detail page (its logs
+*and* stats streams hold the old daemon's handle) → `stop_poll` → clear
+`pending` / `all_containers` / the factory → `connection = None`, `Loading`,
+refresh action disabled → dispatch connect. From there it is the ordinary
+startup path. Nothing downstream changes: still one handle, still one timer.
 - The header bar's far right is the **primary menu** (the `open-menu-symbolic`
   hamburger): a real `gio::Menu` model built with relm4's `menu!` macro, whose
   items are `GAction`s in a "win" group — **Refresh** (Ctrl+R / F5),

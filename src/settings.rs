@@ -8,12 +8,14 @@
 //! needs a compiled GSchema installed before the app will even start, which
 //! breaks the app's `cargo run` workflow; a plain keyfile behaves identically in
 //! dev and installed, needs no schema and no new dependency. The cost is that we
-//! hand-write the defaults and parsing here — for three keys, nothing.
+//! hand-write the defaults and parsing here — for four keys, nothing.
 
 use std::path::PathBuf;
 
 use relm4::adw;
 use relm4::gtk::glib;
+
+use crate::docker::client::RuntimePreference;
 
 /// The window's colour scheme: follow the desktop, or force light/dark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,16 +82,22 @@ pub struct Settings {
     /// Default for the logs "Show timestamps" toggle.
     pub logs_timestamps: bool,
     pub theme: Theme,
+    /// Which container runtime to connect to. Set from the header's runtime
+    /// menu, which only appears when the machine actually offers a choice.
+    pub runtime: RuntimePreference,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         // The values the logs view hardcoded before there was a config file:
-        // wrap on, timestamps off, follow the system theme.
+        // wrap on, timestamps off, follow the system theme. Plus `Auto` for the
+        // runtime, which reproduces the Docker-first discovery order the app
+        // had before it knew Podman existed.
         Self {
             logs_wrap: true,
             logs_timestamps: false,
             theme: Theme::System,
+            runtime: RuntimePreference::Auto,
         }
     }
 }
@@ -120,6 +128,9 @@ impl Settings {
         if let Ok(theme) = keyfile.string("appearance", "theme") {
             settings.theme = Theme::from_key(&theme);
         }
+        if let Ok(runtime) = keyfile.string("runtime", "preference") {
+            settings.runtime = RuntimePreference::from_key(&runtime);
+        }
 
         settings
     }
@@ -131,6 +142,7 @@ impl Settings {
         keyfile.set_boolean("logs", "wrap", self.logs_wrap);
         keyfile.set_boolean("logs", "timestamps", self.logs_timestamps);
         keyfile.set_string("appearance", "theme", self.theme.as_key());
+        keyfile.set_string("runtime", "preference", self.runtime.as_key());
 
         let path = config_path();
         if let Some(dir) = path.parent()
