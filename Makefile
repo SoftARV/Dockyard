@@ -1,6 +1,6 @@
 # Dockyard — build and install to a personal (per-user) prefix.
 #
-# No sudo: this is a one-user, one-machine app (see CLAUDE.md), so everything
+# No sudo: this is a one-user, one-machine app (see AGENTS.md), so everything
 # lands under ~/.local, which is already on PATH and XDG_DATA_DIRS. Override
 # PREFIX for a system install (make PREFIX=/usr/local install, with sudo).
 
@@ -24,7 +24,7 @@ run:
 test:
 	cargo test
 
-# The bar from CLAUDE.md. --all-targets so tests are linted too.
+# The bar from AGENTS.md. --all-targets so tests are linted too.
 check:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings

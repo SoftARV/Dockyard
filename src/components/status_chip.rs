@@ -94,7 +94,7 @@ fn state_variant(state: ContainerState) -> &'static str {
 /// per-widget CSS (`inline_css`) can't express, so there's no scoped
 /// alternative.
 ///
-/// This is the CLAUDE.md-sanctioned custom-CSS exception. libadwaita has no
+/// This is the AGENTS.md-sanctioned custom-CSS exception. libadwaita has no
 /// chip/badge widget for a filled, coloured pill (its `.badge` class is wired to
 /// the view-switcher's number bubble, and the colour classes only tint text).
 /// Colours come from Adwaita's own named colours, so the chip follows the theme

@@ -120,7 +120,7 @@ our own at the boundary so the UI never touches them.
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — the explanation: what the pieces are,
   why they're shaped that way, the Rust patterns you'll hit, and a build log.
-- **[CLAUDE.md](CLAUDE.md)** — the rulebook: the pinned stack and the hard rules
+- **[AGENTS.md](AGENTS.md)** — the rulebook: the pinned stack and the hard rules
   the code holds itself to.
 
 ```

@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-Project instructions for Claude Code. Read this fully before writing code.
+Project instructions for coding agents. Read this fully before writing code.
 
 ## What this is
 

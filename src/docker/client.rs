@@ -3,7 +3,7 @@
 
 //! Socket discovery and thin async wrappers around bollard.
 //!
-//! Everything that knows a socket path lives here (CLAUDE.md rule 2).
+//! Everything that knows a socket path lives here (AGENTS.md rule 2).
 //!
 //! Two runtimes are supported — Docker and Podman — but only ever **one at a
 //! time**. Podman exposes a Docker-compatible API, so once connected every call
@@ -593,7 +593,7 @@ fn rejected(err: BollardError) -> anyhow::Error {
 fn short_reason(err: &BollardError) -> String {
     match err {
         // The container was removed between the poll that drew the row and the
-        // click on it. Routine rather than exceptional (CLAUDE.md rule 5), and
+        // click on it. Routine rather than exceptional (AGENTS.md rule 5), and
         // Docker's own wording here is a wall of id.
         BollardError::DockerResponseServerError {
             status_code: 404, ..

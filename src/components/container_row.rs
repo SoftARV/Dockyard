@@ -12,7 +12,7 @@ use crate::docker::types::Container;
 
 /// What a row asks the parent to do. Rows never touch Docker themselves — they
 /// emit an intent and `AppModel::update` owns the decision, which keeps all
-/// Docker I/O in one reducer (CLAUDE.md rule 4).
+/// Docker I/O in one reducer (AGENTS.md rule 4).
 #[derive(Debug)]
 pub enum ContainerRowOutput {
     Start(String),

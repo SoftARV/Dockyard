@@ -99,7 +99,7 @@ pub enum DetailInput {
 }
 
 /// Intents the page sends up. Like the row, the detail page never calls Docker
-/// itself — `AppModel` owns that (CLAUDE.md rule 4).
+/// itself — `AppModel` owns that (AGENTS.md rule 4).
 #[derive(Debug)]
 pub enum DetailOutput {
     Start(String),

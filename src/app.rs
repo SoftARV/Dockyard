@@ -6,7 +6,7 @@
 //! This is Redux with a compiler: `AppMsg` are the actions, `update` is the sole
 //! reducer, and the view is derived from `AppModel`. Nothing here does I/O
 //! inline — every Docker call is dispatched as a relm4 `Command` so the GTK main
-//! thread never blocks (CLAUDE.md rule 4).
+//! thread never blocks (AGENTS.md rule 4).
 
 use std::collections::HashMap;
 

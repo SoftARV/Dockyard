@@ -3,7 +3,7 @@
 
 //! Our own container types.
 //!
-//! bollard's generated models stop here and never reach the UI (CLAUDE.md
+//! bollard's generated models stop here and never reach the UI (AGENTS.md
 //! rule 3). Everything below is plain owned data with no `Option<Vec<Option<_>>>`
 //! in sight, so the `view!` macro stays readable.
 
