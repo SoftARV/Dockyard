@@ -498,3 +498,20 @@ Cutting `vX.Y.0`:
 Ask before: adding a dependency, introducing a new module, or deviating from the
 relm4 component model. Don't ask before: fixing a clippy lint, adding a doc
 comment, or checking docs.rs.
+
+## Agent skills
+
+### Issue tracker
+
+Use GitHub Issues for SoftARV/Dockyard. Before ticket operations, read
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. Before triaging, read
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout. Before exploring the codebase, read
+`docs/agents/domain.md`.
