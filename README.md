@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="data/icons/hicolor/256x256/apps/dev.miguelrincon.Dockyard.png" width="128" height="128" alt="Dockyard icon">
+  <img src="data/icons/hicolor/256x256/apps/io.github.SoftARV.Dockyard.png" width="128" height="128" alt="Dockyard icon">
 </p>
 
 <h1 align="center">Dockyard</h1>
@@ -28,21 +28,6 @@ management you reach for day to day, done natively.
 Built with [relm4](https://relm4.org/) (the Elm architecture, in Rust),
 [GTK 4](https://www.gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/),
 and [bollard](https://docs.rs/bollard/) for the Docker API.
-
-## Screenshots
-
-Every container, running or stopped, with its status, ports, and one-tap start/stop:
-
-<p align="center">
-  <img src="docs/screenshots/list.png" width="560" alt="Dockyard's container list, showing running, exited, and created containers with status chips and action buttons">
-</p>
-
-Open one for the detail dashboard — live CPU and memory graphs, its details and
-ports, and streaming logs, in a layout that goes side-by-side as the window widens:
-
-<p align="center">
-  <img src="docs/screenshots/detail.png" width="900" alt="Dockyard's container detail view: status, uptime, CPU and memory sparklines, details, ports, and a live log panel">
-</p>
 
 ## Features
 
@@ -106,6 +91,10 @@ make uninstall   # removes everything it installed
 make check       # fmt --check + clippy --all-targets + test (the commit bar)
 ```
 
+The app ID is `io.github.SoftARV.Dockyard`. When upgrading from a version with
+a different app ID, run `make uninstall` from that version before installing
+this one to avoid duplicate launchers. Settings remain in `~/.config/dockyard/`.
+
 > **Note on Wayland:** an app can't set its own window icon on Wayland — the icon
 > comes from the *installed* `.desktop` file. So the icon and app-grid entry
 > appear only after `make install`; `cargo run` won't show them. Launch the
@@ -120,7 +109,7 @@ our own at the boundary so the UI never touches them.
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — the explanation: what the pieces are,
   why they're shaped that way, the Rust patterns you'll hit, and a build log.
-- **[CLAUDE.md](CLAUDE.md)** — the rulebook: the pinned stack and the hard rules
+- **[AGENTS.md](AGENTS.md)** — the rulebook: the pinned stack and the hard rules
   the code holds itself to.
 
 ```
@@ -160,4 +149,4 @@ but **without any warranty** — without even the implied warranty of
 merchantability or fitness for a particular purpose. See the [COPYING](COPYING)
 file for the full license text, or <https://www.gnu.org/licenses/gpl-3.0.html>.
 
-Copyright © 2026 Miguel Rincon.
+Copyright © 2026 SoftARV.

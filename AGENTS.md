@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-Project instructions for Claude Code. Read this fully before writing code.
+Project instructions for coding agents. Read this fully before writing code.
 
 ## What this is
 
@@ -11,18 +11,15 @@ The app should be indistinguishable from a first-party GNOME application. If a
 design decision would make it look like an Electron app or a generic Qt tool, it
 is the wrong decision.
 
-## Author context — read this, it changes how you should respond
-
-The author is a senior frontend engineer (~10 years: TypeScript, React, React
-Native, Node) who is **new to Rust**. Consequences:
+## Rust explanations
 
 - When you introduce ownership, borrowing, lifetimes, `Rc`/`Arc`/`RefCell`, or
   `async` pinning, **briefly explain why** in a comment or in your reply. Do not
   silently sprinkle `.clone()` to make the borrow checker quiet — say what the
   ownership problem was and why the clone is the right or pragmatic fix.
-- Analogies to React/Redux are welcome and land well. relm4 *is* the Elm
-  architecture; say so.
-- Do not dumb down the Rust. Idiomatic code with explanation, not beginner code.
+- Explain relm4 through its Elm architecture: messages update the model and the
+  view derives from state.
+- Write idiomatic Rust and explain the reasoning.
 - Prefer clarity over cleverness. No macro tricks, no premature generics.
 
 ## Stack (pinned — do not swap these out)
@@ -118,8 +115,8 @@ sockets. Resolution order, **runtime-major** (all of Docker, then all of Podman)
 3. Podman: `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/podman/podman.sock`
 
 **The order is runtime-major on purpose, not scope-major.** On a machine with
-rootful Docker and rootless Podman — a common setup, and the dev machine's — a
-rootless-first order would match `podman.sock` before `/var/run/docker.sock` and
+rootful Docker and rootless Podman, a rootless-first order would match
+`podman.sock` before `/var/run/docker.sock` and
 silently switch runtimes: you'd open the app and your Docker containers would be
 gone.
 
@@ -202,8 +199,8 @@ src/
     status_chip.rs        # shared WidgetTemplate (the pill + dot) plus state -> label/variant;
                           #   owns the `.status-chip` stylesheet
 data/
-  dev.miguelrincon.Dockyard.desktop     # plain, not .in — see below
-  icons/hicolor/{16x16,...,512x512,scalable}/apps/dev.miguelrincon.Dockyard.{png,svg}
+  io.github.SoftARV.Dockyard.desktop     # plain, not .in — see below
+  icons/hicolor/{16x16,...,512x512,scalable}/apps/io.github.SoftARV.Dockyard.{png,svg}
 Makefile             # make install -> ~/.local (no sudo); make uninstall; make check
 ```
 
@@ -458,8 +455,8 @@ For rootless: `systemctl --user enable --now docker`.
   `Cargo.toml`. Every source file carries the two-line SPDX header
   (`SPDX-FileCopyrightText` + `SPDX-License-Identifier: GPL-3.0-or-later`) — new
   `.rs` files get it too.
-- App ID: `dev.miguelrincon.Dockyard`. It must match the `.desktop` file name,
-  the GResource prefix (`/dev/miguelrincon/Dockyard/`), and `RelmApp::new()`.
+- App ID: `io.github.SoftARV.Dockyard`. It must match the `.desktop` file name,
+  the GResource prefix (`/io/github/SoftARV/Dockyard/`), and `RelmApp::new()`.
   The app is called **Dockyard** — use that in the window title and `.desktop`
   `Name=`, not "Docker Manager".
 - No Flatpak packaging for now. A Flatpak sandbox can't see the Docker socket
@@ -485,9 +482,8 @@ Cutting `vX.Y.0`:
    points at a buildable state, not just a passing debug build.
 3. Tag `vX.Y.0` (annotated) on the merged commit and push it.
 4. `gh release create vX.Y.0` from the tag, `--latest`. Notes describe the
-   feature set, not a PR-by-PR changelog. Embed screenshots with URLs pinned to
-   the tag (`raw.githubusercontent.com/…/vX.Y.0/docs/screenshots/…`) so they
-   never drift as the branch moves on. Releases are source-only: a
+   feature set, not a PR-by-PR changelog. Use sanitized demo data for any
+   screenshots and pin their URLs to the release tag. Releases are source-only: a
    dynamically-linked GTK binary isn't portable across distros (same reasoning
    as the Flatpak note above).
 5. Reopen the cycle: bump `main` to the next `X.(Y+1).0-dev` in another `chore:`
@@ -498,3 +494,20 @@ Cutting `vX.Y.0`:
 Ask before: adding a dependency, introducing a new module, or deviating from the
 relm4 component model. Don't ask before: fixing a clippy lint, adding a doc
 comment, or checking docs.rs.
+
+## Agent skills
+
+### Issue tracker
+
+Use GitHub Issues for SoftARV/Dockyard. Before ticket operations, read
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. Before triaging, read
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout. Before exploring the codebase, read
+`docs/agents/domain.md`.

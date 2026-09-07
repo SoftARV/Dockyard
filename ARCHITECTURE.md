@@ -3,7 +3,7 @@
 A native GNOME app to manage Docker containers on one Linux laptop.
 
 This document is the map: what the pieces are, why they're shaped that way, and
-what's built versus what isn't. `CLAUDE.md` is the *rulebook* (what we may and
+what's built versus what isn't. `AGENTS.md` is the *rulebook* (what we may and
 may not do); this is the *explanation*.
 
 It assumes you know TypeScript/React well and Rust not at all, so it leans on
@@ -102,8 +102,8 @@ src/
     sparkline.rs              Component -> one live cairo sparkline; CPU and memory each embed one
     status_chip.rs            shared WidgetTemplate (pill + dot) + state -> label/variant
 data/
-  dev.miguelrincon.Dockyard.desktop    launcher entry
-  icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
+  io.github.SoftARV.Dockyard.desktop    launcher entry
+  icons/hicolor/.../apps/io.github.SoftARV.Dockyard.{png,svg}
 Makefile                      make install -> ~/.local; make uninstall; make check
 ```
 
@@ -242,7 +242,7 @@ thread. Cloning satisfies both.
 This clone is cheap and intended: bollard's `Docker` is an `Arc`-backed handle
 (atomically reference-counted pointer), so cloning bumps a counter rather than
 copying a connection. Think of it as copying a reference to a shared object, not
-`structuredClone`. When CLAUDE.md says "don't sprinkle `.clone()` to quiet the
+`structuredClone`. When AGENTS.md says "don't sprinkle `.clone()` to quiet the
 borrow checker", this is the legitimate case: the ownership problem is real
 (the task outlives the caller) and the clone is the correct fix, not a dodge.
 
@@ -260,7 +260,7 @@ in one character.
 nothing, bail". You'll see it in `dispatch`: no daemon, nothing to do.
 
 **`.unwrap()` is the one to avoid.** It means "give me the value, and if there
-isn't one, crash the process". CLAUDE.md bans it outside `main.rs` because
+isn't one, crash the process". AGENTS.md bans it outside `main.rs` because
 Docker calls fail routinely — a container can be removed between the poll that
 drew the row and your click on it. Those become toasts, not panics.
 
@@ -374,7 +374,7 @@ Two methodology notes, learned the hard way:
 GTK is single-threaded: one thread owns every widget and paints every frame. If
 `update()` blocks for 3 seconds, the window doesn't redraw or drag for 3
 seconds. Docker calls take unbounded time, so they *all* go through commands,
-which run on tokio worker threads and post results back. That's what CLAUDE.md
+which run on tokio worker threads and post results back. That's what AGENTS.md
 rule 4 protects.
 
 ### Rebuilding widgets hides staleness bugs
@@ -453,15 +453,15 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 
 | Decision | Why |
 | --- | --- |
-| App ID `dev.miguelrincon.Dockyard` | Chosen when the repo had no remote. `io.github.SoftARV.Dockyard` is now also defensible; changing it means updating `main.rs`, the `.desktop` name and the GResource prefix together. |
-| Poll every 2s, don't use events | CLAUDE.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
+| App ID `io.github.SoftARV.Dockyard` | Uses the public repository identity. Keep `main.rs`, the `.desktop` name, icon names, and the GResource prefix in sync. |
+| Poll every 2s, don't use events | AGENTS.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
 | The poll is silent; only user-initiated refresh spins | A spinner blinking every 2s forever is worse than no feedback. `AppMsg::ManualRefresh` exists purely to draw that line. |
 | Actions refresh immediately on completion | Waiting up to 2s for the next poll made even fast actions feel broken. |
 | `gnome_49` for `adw::ShortcutsDialog` | The keyboard-shortcuts overlay's old widget, `GtkShortcutsWindow`, is deprecated since GTK 4.18 and breaks `clippy -D warnings` at any feature level that enables the deprecation; its replacement `adw::ShortcutsDialog` needs libadwaita 1.8. (We were already on `gnome_46` for `adw::AlertDialog` — 1.5; `MessageDialog` works at 1.4 but is deprecated from 1.6.) Floor is now GNOME 49 (Sep 2025); the bump changed no crate versions. |
 | Update rows in place; rebuild only when membership changes | The first cut rebuilt every row on every poll. That destroys widgets 30 times a minute, and an open popover — parented to a row's menu button — died with it. Cheapness was never the issue; rebuilding throws away interaction state. |
 | `remove_container` isn't forced | Removing a running container should fail loudly rather than silently kill it. |
 | Sort by name | Docker returns newest-first; a list that reorders under your cursor every 2s is worse than a stable one. |
-| `tracing-subscriber` added | Not in CLAUDE.md's stack table, but `main.rs`'s job of "tracing init" is impossible without it. `env-filter` gives `RUST_LOG`. |
+| `tracing-subscriber` added | Not in AGENTS.md's stack table, but `main.rs`'s job of "tracing init" is impossible without it. `env-filter` gives `RUST_LOG`. |
 | Settings in a keyfile, not GSettings | GSettings needs a compiled GSchema installed before `gio::Settings::new` works, which breaks `cargo run` on a fresh tree. `glib::KeyFile` behaves identically in dev and installed and adds no dependency; hand-writing three defaults is nothing. |
 | Theme override applies live, follow-system by default | `adw::StyleManager::set_color_scheme` on change, and once at startup before the window shows so there's no flash of the wrong scheme. |
 | Logs are a fixed dark terminal | A console reads best on a stable dark background, so the log panel deliberately ignores light/dark. The one place the app opts *out* of theming. |
@@ -707,8 +707,7 @@ where `GtkShortcutsWindow` had to be assembled from an inline GtkBuilder XML blo
 (its children register through the `Buildable` interface, so `append` wouldn't
 do), `ShortcutsDialog` is built imperatively — `ShortcutsSection` +
 `ShortcutsItem` — and presents as an `adw::Dialog` like the app's other dialogs.
-The trade is the install floor: GNOME 49 (Sep 2025), fine for a personal,
-single-machine app already on a newer libadwaita.
+The trade is the install floor: GNOME 49 (Sep 2025).
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
@@ -740,7 +739,7 @@ proved GTK could resolve the name — it never proved the icon would *appear*,
 because on Wayland the Shell decides the window icon and never asks GTK. Testing
 the resolvable layer felt like testing the visible one. It wasn't.
 
-The single shared string `dev.miguelrincon.Dockyard` is the app ID, the
+The single shared string `io.github.SoftARV.Dockyard` is the app ID, the
 `.desktop` filename, the `Icon=` value, and the icon filename. That's not
 repetition — it's the join key GNOME uses to connect a running window to its
 launcher and icon, which is why no `StartupWMClass` is needed.
@@ -820,7 +819,7 @@ beyond "running" (see "Known rough edges").
 ### Later, deliberately (v2)
 
 - **Events instead of polling** — `docker.events()` via a `command`. Only once
-  polling is proven, per CLAUDE.md phase 2. It's a latency win, not a resource
+  polling is proven, per AGENTS.md phase 2. It's a latency win, not a resource
   one — see "What the app actually costs".
 
 ### Known rough edges
@@ -832,7 +831,7 @@ beyond "running" (see "Known rough edges").
   starts fine with only loopback, reachable by nothing. We draw it as an
   ordinary "Up 3 minutes" row with no ports — accurate, because that is exactly
   what Docker reports, and still misleading. The absent port is the only tell.
-  Surfacing it properly would mean inspecting networks, which CLAUDE.md puts
+  Surfacing it properly would mean inspecting networks, which AGENTS.md puts
   out of scope, so this stays a known blind spot rather than a TODO.
 - GNOME takes ~4s to mark a window suspended, so the poll lingers briefly after
   you minimise. Expected, not a bug — don't go looking for a faster signal.
@@ -844,15 +843,15 @@ beyond "running" (see "Known rough edges").
   gets free. The header's primary menu (#25) shows the model-based way now, so
   converting the row menu is a matter of following that pattern if it grows past
   restart/remove.
-- The rootless socket path is only reachable on a rootless install; on this
-  machine it's tested by faking `XDG_RUNTIME_DIR`.
+- Socket discovery tests supply synthetic runtime-directory paths to exercise
+  rootless discovery without a rootless installation.
 
 ### Stay lean — flag the drift, don't gatekeep
 
 Image builds, `docker compose`, volumes, networks, registries, `exec`,
 multi-host. None are the default focus; the app is a personal, single-machine
 container manager, not Docker Desktop. This was a hard "out of scope" list once
-— it's now a reminder, matching CLAUDE.md's revised scope. When a change grows
+— it's now a reminder, matching AGENTS.md's revised scope. When a change grows
 toward Docker Desktop, **name the cost and the direction** so it's a conscious
 choice, then build it if it's genuinely useful here. Resource graphs used to sit
 on this list; #15 built them anyway, precisely because they earned it — that's
