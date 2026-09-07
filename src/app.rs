@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 SoftARV
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Root component.
@@ -924,12 +924,12 @@ impl Component for AppModel {
                     .application_name("Dockyard")
                     .application_icon(crate::APP_ID)
                     .version(env!("CARGO_PKG_VERSION"))
-                    .developer_name("Miguel Rincon")
+                    .developer_name("SoftARV")
                     .comments("Manage the Docker containers on your machine, natively.")
                     .website("https://github.com/SoftARV/Dockyard")
                     .issue_url("https://github.com/SoftARV/Dockyard/issues")
                     .license_type(gtk::License::Gpl30)
-                    .copyright("© 2026 Miguel Rincon")
+                    .copyright("© 2026 SoftARV")
                     // Which runtime is actually answering, and its version.
                     // The header chip is hidden on a single-runtime machine, so
                     // About is where that stays answerable regardless.

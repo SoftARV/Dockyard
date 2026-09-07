@@ -7,7 +7,7 @@
 PREFIX  ?= $(HOME)/.local
 BINDIR   = $(PREFIX)/bin
 DATADIR  = $(PREFIX)/share
-APPID    = dev.miguelrincon.Dockyard
+APPID    = io.github.SoftARV.Dockyard
 
 ICON_SIZES = 16 32 48 64 128 256 512
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 SoftARV
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! One container, rendered as an `adw::ActionRow`.

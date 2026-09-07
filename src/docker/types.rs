@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 SoftARV
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Our own container types.
@@ -131,7 +131,7 @@ impl Container {
     pub fn from_summary(summary: ContainerSummary) -> Option<Self> {
         let id = summary.id?;
 
-        // Docker returns names with a leading slash ("/inventory_pos_db") and a
+        // Docker returns names with a leading slash ("/example_database") and a
         // container can technically have several; the first is the canonical one.
         let name = summary
             .names
@@ -464,11 +464,11 @@ mod tests {
     #[test]
     fn strips_the_leading_slash_docker_puts_on_names() {
         let summary = ContainerSummary {
-            names: Some(vec!["/inventory_pos_db".to_owned()]),
+            names: Some(vec!["/example_database".to_owned()]),
             ..bare("abc123")
         };
         let container = Container::from_summary(summary).expect("has an id");
-        assert_eq!(container.name, "inventory_pos_db");
+        assert_eq!(container.name, "example_database");
     }
 
     #[test]

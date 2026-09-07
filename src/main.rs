@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 SoftARV
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod app;
@@ -11,7 +11,7 @@ use relm4::gtk;
 use relm4::gtk::gdk;
 use tracing_subscriber::EnvFilter;
 
-pub(crate) const APP_ID: &str = "dev.miguelrincon.Dockyard";
+pub(crate) const APP_ID: &str = "io.github.SoftARV.Dockyard";
 
 fn main() {
     tracing_subscriber::fmt()
@@ -39,9 +39,8 @@ fn main() {
 
 /// Point GTK at our icon and name it as the default.
 ///
-/// This does **not** put an icon on the window under Wayland — this machine's
-/// setup — and it's worth being blunt about that, because it looks like it
-/// should. On Wayland a client cannot set its own toplevel icon at all. GNOME
+/// This does **not** put an icon on the window under Wayland.
+/// On Wayland a client cannot set its own toplevel icon at all. GNOME
 /// Shell picks the icon by matching the window to an installed `.desktop`
 /// (partly on `app_id`, partly on the executable), so only the *installed* app
 /// shows an icon; `cargo run` never will, no matter what this function does.

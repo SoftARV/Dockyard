@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Miguel Rincon
+// SPDX-FileCopyrightText: 2026 SoftARV
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Socket discovery and thin async wrappers around bollard.
@@ -856,7 +856,7 @@ mod tests {
              \"f1635166cbf3f8c5a8a8ac3e39ab838f11cd610383bf6e0b8e3aabe1de1b0646\": \
              container is running: stop the container before removing or force remove",
         );
-        // "Couldn't remove inventory_pos_db: " is ~33 chars; an adw::Toast
+        // "Couldn't remove example_database: " is ~33 chars; an adw::Toast
         // truncates around 60-70 in a 540px window.
         assert!(
             short_reason(&err).len() <= 30,

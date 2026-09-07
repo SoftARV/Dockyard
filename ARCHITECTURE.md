@@ -102,8 +102,8 @@ src/
     sparkline.rs              Component -> one live cairo sparkline; CPU and memory each embed one
     status_chip.rs            shared WidgetTemplate (pill + dot) + state -> label/variant
 data/
-  dev.miguelrincon.Dockyard.desktop    launcher entry
-  icons/hicolor/.../apps/dev.miguelrincon.Dockyard.{png,svg}
+  io.github.SoftARV.Dockyard.desktop    launcher entry
+  icons/hicolor/.../apps/io.github.SoftARV.Dockyard.{png,svg}
 Makefile                      make install -> ~/.local; make uninstall; make check
 ```
 
@@ -453,7 +453,7 @@ That's how we established that `RelmApp::new` already calls `adw::init()` (so
 
 | Decision | Why |
 | --- | --- |
-| App ID `dev.miguelrincon.Dockyard` | Chosen when the repo had no remote. `io.github.SoftARV.Dockyard` is now also defensible; changing it means updating `main.rs`, the `.desktop` name and the GResource prefix together. |
+| App ID `io.github.SoftARV.Dockyard` | Uses the public repository identity. Keep `main.rs`, the `.desktop` name, icon names, and the GResource prefix in sync. |
 | Poll every 2s, don't use events | AGENTS.md phase 1. Boring and correct. `docker.events()` comes only once polling works end to end. |
 | The poll is silent; only user-initiated refresh spins | A spinner blinking every 2s forever is worse than no feedback. `AppMsg::ManualRefresh` exists purely to draw that line. |
 | Actions refresh immediately on completion | Waiting up to 2s for the next poll made even fast actions feel broken. |
@@ -707,8 +707,7 @@ where `GtkShortcutsWindow` had to be assembled from an inline GtkBuilder XML blo
 (its children register through the `Buildable` interface, so `append` wouldn't
 do), `ShortcutsDialog` is built imperatively — `ShortcutsSection` +
 `ShortcutsItem` — and presents as an `adw::Dialog` like the app's other dialogs.
-The trade is the install floor: GNOME 49 (Sep 2025), fine for a personal,
-single-machine app already on a newer libadwaita.
+The trade is the install floor: GNOME 49 (Sep 2025).
 
 ### How the app finds its own icon (and why Wayland is the twist)
 
@@ -740,7 +739,7 @@ proved GTK could resolve the name — it never proved the icon would *appear*,
 because on Wayland the Shell decides the window icon and never asks GTK. Testing
 the resolvable layer felt like testing the visible one. It wasn't.
 
-The single shared string `dev.miguelrincon.Dockyard` is the app ID, the
+The single shared string `io.github.SoftARV.Dockyard` is the app ID, the
 `.desktop` filename, the `Icon=` value, and the icon filename. That's not
 repetition — it's the join key GNOME uses to connect a running window to its
 launcher and icon, which is why no `StartupWMClass` is needed.
@@ -844,8 +843,8 @@ beyond "running" (see "Known rough edges").
   gets free. The header's primary menu (#25) shows the model-based way now, so
   converting the row menu is a matter of following that pattern if it grows past
   restart/remove.
-- The rootless socket path is only reachable on a rootless install; on this
-  machine it's tested by faking `XDG_RUNTIME_DIR`.
+- Socket discovery tests supply synthetic runtime-directory paths to exercise
+  rootless discovery without a rootless installation.
 
 ### Stay lean — flag the drift, don't gatekeep
 

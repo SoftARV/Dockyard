@@ -7,7 +7,7 @@ Comment=Manage Docker containers
 Exec=dockyard
 # Icon and app ID share the name on purpose — GNOME resolves the launcher, the
 # window (by Wayland app_id) and the themed icon all through this one string.
-Icon=dev.miguelrincon.Dockyard
+Icon=io.github.SoftARV.Dockyard
 Terminal=false
 Categories=System;
 Keywords=docker;container;
